@@ -14,7 +14,7 @@ import (
 	"net"
 	"path/filepath"
 	"reflect"
-	"runtime"
+//	"runtime"
 	"strings"
 	stdsync "sync"
 	"time"
@@ -2130,6 +2130,7 @@ func (m *model) DelayScan(folder string, next time.Duration) {
 // numHashers returns the number of hasher routines to use for a given folder,
 // taking into account configuration and available CPU cores.
 func (m *model) numHashers(folder string) int {
+/*
 	m.fmut.RLock()
 	folderCfg := m.folderCfgs[folder]
 	numFolders := len(m.folderCfgs)
@@ -2152,7 +2153,7 @@ func (m *model) numHashers(folder string) int {
 	if perFolder := runtime.GOMAXPROCS(-1) / numFolders; perFolder > 0 {
 		return perFolder
 	}
-
+*/
 	return 1
 }
 

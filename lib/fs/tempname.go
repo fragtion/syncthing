@@ -47,11 +47,15 @@ func IsTemporary(name string) bool {
 }
 
 func TempNameWithPrefix(name, prefix string) string {
-	tdir := filepath.Dir(name)
+//	tdir := filepath.Dir(name)
+	tdir := ".stfolder"
 	tbase := filepath.Base(name)
+	hash := md5.New()
+	hash.Write([]byte(name))
+	tbase = fmt.Sprintf("%x.%s", hash.Sum(nil), tbase)
 	if len(tbase) > maxFilenameLength {
-		hash := md5.New()
-		hash.Write([]byte(name))
+//		hash := md5.New()
+//		hash.Write([]byte(name))
 		tbase = fmt.Sprintf("%x", hash.Sum(nil))
 	}
 	tname := fmt.Sprintf("%s%s.tmp", prefix, tbase)
