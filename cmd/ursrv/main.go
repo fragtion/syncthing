@@ -28,6 +28,7 @@ import (
 
 	"github.com/oschwald/geoip2-golang"
 
+	"github.com/syncthing/syncthing/lib/upgrade"
 	"github.com/syncthing/syncthing/lib/ur/contract"
 )
 
@@ -54,7 +55,7 @@ var (
 		{regexp.MustCompile("jenkins@build.syncthing.net"), "GitHub"},
 		{regexp.MustCompile("snap@build.syncthing.net"), "Snapcraft"},
 		{regexp.MustCompile("android-.*vagrant@basebox-stretch64"), "F-Droid"},
-		{regexp.MustCompile("builduser@svetlemodry"), "Arch (3rd party)"},
+		{regexp.MustCompile("builduser@(archlinux|svetlemodry)"), "Arch (3rd party)"},
 		{regexp.MustCompile("synology@kastelo.net"), "Synology (Kastelo)"},
 		{regexp.MustCompile("@debian"), "Debian (3rd party)"},
 		{regexp.MustCompile("@fedora"), "Fedora (3rd party)"},
@@ -753,6 +754,8 @@ func getReport(db *sql.DB) map[string]interface{} {
 				add(featureGroups["Folder"]["v3"], "Pull Order", prettyCase(key), value)
 			}
 
+			inc(features["Device"]["v3"], "Untrusted", rep.DeviceUsesV3.Untrusted)
+
 			totals["GUI"] += rep.GUIStats.Enabled
 
 			inc(features["GUI"]["v3"], "Auth Enabled", rep.GUIStats.UseAuth)
@@ -919,7 +922,7 @@ func getReport(db *sql.DB) map[string]interface{} {
 }
 
 var (
-	plusRe  = regexp.MustCompile(`\+.*$`)
+	plusRe  = regexp.MustCompile(`(\+.*|\.dev\..*)$`)
 	plusStr = "(+dev)"
 )
 
@@ -978,7 +981,9 @@ func (s *summary) MarshalJSON() ([]byte, error) {
 	for v := range s.versions {
 		versions = append(versions, v)
 	}
-	sort.Strings(versions)
+	sort.Slice(versions, func(a, b int) bool {
+		return upgrade.CompareVersions(versions[a], versions[b]) < 0
+	})
 
 	var filtered []string
 	for _, v := range versions {

@@ -16,7 +16,7 @@ import (
 // FileInfo.Blocks that the remote device already has, and version represents
 // the version of the file that the remote device is downloading.
 type deviceFolderFileDownloadState struct {
-	blockIndexes []int32
+	blockIndexes []int
 	version      protocol.Vector
 	blockSize    int
 }
@@ -30,7 +30,7 @@ type deviceFolderDownloadState struct {
 
 // Has returns whether a block at that specific index, and that specific version of the file
 // is currently available on the remote device for pulling from a temporary file.
-func (p *deviceFolderDownloadState) Has(file string, version protocol.Vector, index int32) bool {
+func (p *deviceFolderDownloadState) Has(file string, version protocol.Vector, index int) bool {
 	p.mut.RLock()
 	defer p.mut.RUnlock()
 
@@ -56,9 +56,9 @@ func (p *deviceFolderDownloadState) Update(updates []protocol.FileDownloadProgre
 
 	for _, update := range updates {
 		local, ok := p.files[update.Name]
-		if update.UpdateType == protocol.UpdateTypeForget && ok && local.version.Equal(update.Version) {
+		if update.UpdateType == protocol.FileDownloadProgressUpdateTypeForget && ok && local.version.Equal(update.Version) {
 			delete(p.files, update.Name)
-		} else if update.UpdateType == protocol.UpdateTypeAppend {
+		} else if update.UpdateType == protocol.FileDownloadProgressUpdateTypeAppend {
 			if !ok {
 				local = deviceFolderFileDownloadState{
 					blockIndexes: update.BlockIndexes,
@@ -78,6 +78,9 @@ func (p *deviceFolderDownloadState) Update(updates []protocol.FileDownloadProgre
 }
 
 func (p *deviceFolderDownloadState) BytesDownloaded() int64 {
+	p.mut.RLock()
+	defer p.mut.RUnlock()
+
 	var res int64
 	for _, state := range p.files {
 		// BlockSize is a new field introduced in 1.4.1, thus a fallback
@@ -134,7 +137,7 @@ func (t *deviceDownloadState) Update(folder string, updates []protocol.FileDownl
 
 // Has returns whether block at that specific index, and that specific version of the file
 // is currently available on the remote device for pulling from a temporary file.
-func (t *deviceDownloadState) Has(folder, file string, version protocol.Vector, index int32) bool {
+func (t *deviceDownloadState) Has(folder, file string, version protocol.Vector, index int) bool {
 	if t == nil {
 		return false
 	}

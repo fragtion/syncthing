@@ -126,10 +126,33 @@ func newState(cfg config.Configuration) *model {
 	m := setupModel(wcfg)
 
 	for _, dev := range cfg.Devices {
-		m.AddConnection(&fakeConnection{id: dev.DeviceID, model: m}, protocol.HelloResult{})
+		m.AddConnection(&fakeConnection{id: dev.DeviceID, model: m}, protocol.Hello{})
 	}
 
 	return m
+}
+
+func createClusterConfig(remote protocol.DeviceID, ids ...string) protocol.ClusterConfig {
+	cc := protocol.ClusterConfig{
+		Folders: make([]protocol.Folder, len(ids)),
+	}
+	for i, id := range ids {
+		cc.Folders[i] = protocol.Folder{
+			ID:    id,
+			Label: id,
+		}
+	}
+	return addFolderDevicesToClusterConfig(cc, remote)
+}
+
+func addFolderDevicesToClusterConfig(cc protocol.ClusterConfig, remote protocol.DeviceID) protocol.ClusterConfig {
+	for i := range cc.Folders {
+		cc.Folders[i].Devices = []protocol.Device{
+			{ID: myID},
+			{ID: remote},
+		}
+	}
+	return cc
 }
 
 func TestRequest(t *testing.T) {
@@ -137,7 +160,7 @@ func TestRequest(t *testing.T) {
 	defer cleanupModel(m)
 
 	// Existing, shared file
-	res, err := m.Request(device1, "default", "foo", 6, 0, nil, 0, false)
+	res, err := m.Request(device1, "default", "foo", 0, 6, 0, nil, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,33 +170,37 @@ func TestRequest(t *testing.T) {
 	}
 
 	// Existing, nonshared file
-	_, err = m.Request(device2, "default", "foo", 6, 0, nil, 0, false)
+	_, err = m.Request(device2, "default", "foo", 0, 6, 0, nil, 0, false)
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
 
 	// Nonexistent file
-	_, err = m.Request(device1, "default", "nonexistent", 6, 0, nil, 0, false)
+	_, err = m.Request(device1, "default", "nonexistent", 0, 6, 0, nil, 0, false)
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
 
 	// Shared folder, but disallowed file name
-	_, err = m.Request(device1, "default", "../walk.go", 6, 0, nil, 0, false)
+	_, err = m.Request(device1, "default", "../walk.go", 0, 6, 0, nil, 0, false)
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
 
 	// Negative offset
-	_, err = m.Request(device1, "default", "foo", -4, 0, nil, 0, false)
+	_, err = m.Request(device1, "default", "foo", 0, -4, 0, nil, 0, false)
 	if err == nil {
 		t.Error("Unexpected nil error on insecure file read")
 	}
 
 	// Larger block than available
-	_, err = m.Request(device1, "default", "foo", 42, 0, nil, 0, false)
+	_, err = m.Request(device1, "default", "foo", 0, 42, 0, []byte("hash necessary but not checked"), 0, false)
 	if err == nil {
-		t.Error("Unexpected nil error on insecure file read")
+		t.Error("Unexpected nil error on read past end of file")
+	}
+	_, err = m.Request(device1, "default", "foo", 0, 42, 0, nil, 0, false)
+	if err != nil {
+		t.Error("Unexpected error when large read should be permitted")
 	}
 }
 
@@ -254,12 +281,12 @@ func BenchmarkRequestOut(b *testing.B) {
 	for _, f := range files {
 		fc.addFile(f.Name, 0644, protocol.FileInfoTypeFile, []byte("some data to return"))
 	}
-	m.AddConnection(fc, protocol.HelloResult{})
+	m.AddConnection(fc, protocol.Hello{})
 	m.Index(device1, "default", files)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		data, err := m.requestGlobal(context.Background(), device1, "default", files[i%n].Name, 0, 32, nil, 0, false)
+		data, err := m.requestGlobal(context.Background(), device1, "default", files[i%n].Name, 0, 0, 32, nil, 0, false)
 		if err != nil {
 			b.Error(err)
 		}
@@ -283,7 +310,7 @@ func BenchmarkRequestInSingleFile(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if _, err := m.Request(device1, "default", "request/for/a/file/in/a/couple/of/dirs/128k", 128<<10, 0, nil, 0, false); err != nil {
+		if _, err := m.Request(device1, "default", "request/for/a/file/in/a/couple/of/dirs/128k", 0, 128<<10, 0, nil, 0, false); err != nil {
 			b.Error(err)
 		}
 	}
@@ -292,7 +319,7 @@ func BenchmarkRequestInSingleFile(b *testing.B) {
 }
 
 func TestDeviceRename(t *testing.T) {
-	hello := protocol.HelloResult{
+	hello := protocol.Hello{
 		ClientName:    "syncthing",
 		ClientVersion: "v0.9.4",
 	}
@@ -340,7 +367,7 @@ func TestDeviceRename(t *testing.T) {
 		t.Errorf("Device name got overwritten")
 	}
 
-	cfgw, err := config.Load("testdata/tmpconfig.xml", myID, events.NoopLogger)
+	cfgw, _, err := config.Load("testdata/tmpconfig.xml", myID, events.NoopLogger)
 	if err != nil {
 		t.Error(err)
 		return
@@ -496,23 +523,16 @@ func TestIntroducer(t *testing.T) {
 			},
 		},
 	})
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID: "folder1",
-				Devices: []protocol.Device{
-					{
-						ID:                       device2,
-						Introducer:               true,
-						SkipIntroductionRemovals: true,
-					},
-				},
-			},
-		},
+	cc := basicClusterConfig(myID, device1, "folder1")
+	cc.Folders[0].Devices = append(cc.Folders[0].Devices, protocol.Device{
+		ID:                       device2,
+		Introducer:               true,
+		SkipIntroductionRemovals: true,
 	})
+	m.ClusterConfig(device1, cc)
 
 	if newDev, ok := m.cfg.Device(device2); !ok || !newDev.Introducer || !newDev.SkipIntroductionRemovals {
-		t.Error("devie 2 missing or wrong flags")
+		t.Error("device 2 missing or wrong flags")
 	}
 
 	if !contains(m.cfg.Folders()["folder1"], device2, device1) {
@@ -549,20 +569,13 @@ func TestIntroducer(t *testing.T) {
 			},
 		},
 	})
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID: "folder2",
-				Devices: []protocol.Device{
-					{
-						ID:                       device2,
-						Introducer:               true,
-						SkipIntroductionRemovals: true,
-					},
-				},
-			},
-		},
+	cc = basicClusterConfig(myID, device1, "folder2")
+	cc.Folders[0].Devices = append(cc.Folders[0].Devices, protocol.Device{
+		ID:                       device2,
+		Introducer:               true,
+		SkipIntroductionRemovals: true,
 	})
+	m.ClusterConfig(device1, cc)
 
 	// Should not get introducer, as it's already unset, and it's an existing device.
 	if newDev, ok := m.cfg.Device(device2); !ok || newDev.Introducer || newDev.SkipIntroductionRemovals {
@@ -703,20 +716,13 @@ func TestIntroducer(t *testing.T) {
 			},
 		},
 	})
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID: "folder2",
-				Devices: []protocol.Device{
-					{
-						ID:                       device2,
-						Introducer:               true,
-						SkipIntroductionRemovals: true,
-					},
-				},
-			},
-		},
+	cc = basicClusterConfig(myID, device1, "folder2")
+	cc.Folders[0].Devices = append(cc.Folders[0].Devices, protocol.Device{
+		ID:                       device2,
+		Introducer:               true,
+		SkipIntroductionRemovals: true,
 	})
+	m.ClusterConfig(device1, cc)
 
 	if _, ok := m.cfg.Device(device2); !ok {
 		t.Error("device 2 should not have been removed")
@@ -875,14 +881,7 @@ func TestIssue5063(t *testing.T) {
 	wg := sync.WaitGroup{}
 
 	addAndVerify := func(id string) {
-		m.ClusterConfig(device1, protocol.ClusterConfig{
-			Folders: []protocol.Folder{
-				{
-					ID:    id,
-					Label: id,
-				},
-			},
-		})
+		m.ClusterConfig(device1, createClusterConfig(device1, id))
 		if fcfg, ok := m.cfg.Folder(id); !ok || !fcfg.SharedWith(device1) {
 			t.Error("expected shared", id)
 		}
@@ -925,14 +924,7 @@ func TestAutoAcceptRejected(t *testing.T) {
 	defer cleanupModel(m)
 	id := srand.String(8)
 	defer os.RemoveAll(id)
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID:    id,
-				Label: id,
-			},
-		},
-	})
+	m.ClusterConfig(device1, createClusterConfig(device1, id))
 
 	if cfg, ok := m.cfg.Folder(id); ok && cfg.SharedWith(device1) {
 		t.Error("unexpected shared", id)
@@ -945,14 +937,7 @@ func TestAutoAcceptNewFolder(t *testing.T) {
 	defer cleanupModel(m)
 	id := srand.String(8)
 	defer os.RemoveAll(id)
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID:    id,
-				Label: id,
-			},
-		},
-	})
+	m.ClusterConfig(device1, createClusterConfig(device1, id))
 	if fcfg, ok := m.cfg.Folder(id); !ok || !fcfg.SharedWith(device1) {
 		t.Error("expected shared", id)
 	}
@@ -963,28 +948,14 @@ func TestAutoAcceptNewFolderFromTwoDevices(t *testing.T) {
 	defer cleanupModel(m)
 	id := srand.String(8)
 	defer os.RemoveAll(id)
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID:    id,
-				Label: id,
-			},
-		},
-	})
+	m.ClusterConfig(device1, createClusterConfig(device1, id))
 	if fcfg, ok := m.cfg.Folder(id); !ok || !fcfg.SharedWith(device1) {
 		t.Error("expected shared", id)
 	}
 	if fcfg, ok := m.cfg.Folder(id); !ok || fcfg.SharedWith(device2) {
 		t.Error("unexpected expected shared", id)
 	}
-	m.ClusterConfig(device2, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID:    id,
-				Label: id,
-			},
-		},
-	})
+	m.ClusterConfig(device2, createClusterConfig(device2, id))
 	if fcfg, ok := m.cfg.Folder(id); !ok || !fcfg.SharedWith(device2) {
 		t.Error("expected shared", id)
 	}
@@ -997,28 +968,14 @@ func TestAutoAcceptNewFolderFromOnlyOneDevice(t *testing.T) {
 	id := srand.String(8)
 	defer os.RemoveAll(id)
 	defer cleanupModel(m)
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID:    id,
-				Label: id,
-			},
-		},
-	})
+	m.ClusterConfig(device1, createClusterConfig(device1, id))
 	if fcfg, ok := m.cfg.Folder(id); !ok || !fcfg.SharedWith(device1) {
 		t.Error("expected shared", id)
 	}
 	if fcfg, ok := m.cfg.Folder(id); !ok || fcfg.SharedWith(device2) {
 		t.Error("unexpected expected shared", id)
 	}
-	m.ClusterConfig(device2, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID:    id,
-				Label: id,
-			},
-		},
-	})
+	m.ClusterConfig(device2, createClusterConfig(device2, id))
 	if fcfg, ok := m.cfg.Folder(id); !ok || fcfg.SharedWith(device2) {
 		t.Error("unexpected shared", id)
 	}
@@ -1074,18 +1031,7 @@ func TestAutoAcceptMultipleFolders(t *testing.T) {
 	defer os.RemoveAll(id2)
 	m := newState(defaultAutoAcceptCfg)
 	defer cleanupModel(m)
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID:    id1,
-				Label: id1,
-			},
-			{
-				ID:    id2,
-				Label: id2,
-			},
-		},
-	})
+	m.ClusterConfig(device1, createClusterConfig(device1, id1, id2))
 	if fcfg, ok := m.cfg.Folder(id1); !ok || !fcfg.SharedWith(device1) {
 		t.Error("expected shared", id1)
 	}
@@ -1113,14 +1059,7 @@ func TestAutoAcceptExistingFolder(t *testing.T) {
 	if fcfg, ok := m.cfg.Folder(id); !ok || fcfg.SharedWith(device1) {
 		t.Error("missing folder, or shared", id)
 	}
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID:    id,
-				Label: id,
-			},
-		},
-	})
+	m.ClusterConfig(device1, createClusterConfig(device1, id))
 
 	if fcfg, ok := m.cfg.Folder(id); !ok || !fcfg.SharedWith(device1) || fcfg.Path != idOther {
 		t.Error("missing folder, or unshared, or path changed", id)
@@ -1146,18 +1085,7 @@ func TestAutoAcceptNewAndExistingFolder(t *testing.T) {
 	if fcfg, ok := m.cfg.Folder(id1); !ok || fcfg.SharedWith(device1) {
 		t.Error("missing folder, or shared", id1)
 	}
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID:    id1,
-				Label: id1,
-			},
-			{
-				ID:    id2,
-				Label: id2,
-			},
-		},
-	})
+	m.ClusterConfig(device1, createClusterConfig(device1, id1, id2))
 
 	for i, id := range []string{id1, id2} {
 		if fcfg, ok := m.cfg.Folder(id); !ok || !fcfg.SharedWith(device1) {
@@ -1187,14 +1115,7 @@ func TestAutoAcceptAlreadyShared(t *testing.T) {
 	if fcfg, ok := m.cfg.Folder(id); !ok || !fcfg.SharedWith(device1) {
 		t.Error("missing folder, or not shared", id)
 	}
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID:    id,
-				Label: id,
-			},
-		},
-	})
+	m.ClusterConfig(device1, createClusterConfig(device1, id))
 
 	if fcfg, ok := m.cfg.Folder(id); !ok || !fcfg.SharedWith(device1) {
 		t.Error("missing folder, or not shared", id)
@@ -1233,14 +1154,14 @@ func TestAutoAcceptPrefersLabel(t *testing.T) {
 	defer os.RemoveAll(id)
 	defer os.RemoveAll(label)
 	defer cleanupModel(m)
-	m.ClusterConfig(device1, protocol.ClusterConfig{
+	m.ClusterConfig(device1, addFolderDevicesToClusterConfig(protocol.ClusterConfig{
 		Folders: []protocol.Folder{
 			{
 				ID:    id,
 				Label: label,
 			},
 		},
-	})
+	}, device1))
 	if fcfg, ok := m.cfg.Folder(id); !ok || !fcfg.SharedWith(device1) || !strings.HasSuffix(fcfg.Path, label) {
 		t.Error("expected shared, or wrong path", id, label, fcfg.Path)
 	}
@@ -1258,14 +1179,14 @@ func TestAutoAcceptFallsBackToID(t *testing.T) {
 	defer os.RemoveAll(label)
 	defer os.RemoveAll(id)
 	defer cleanupModel(m)
-	m.ClusterConfig(device1, protocol.ClusterConfig{
+	m.ClusterConfig(device1, addFolderDevicesToClusterConfig(protocol.ClusterConfig{
 		Folders: []protocol.Folder{
 			{
 				ID:    id,
 				Label: label,
 			},
 		},
-	})
+	}, device1))
 	if fcfg, ok := m.cfg.Folder(id); !ok || !fcfg.SharedWith(device1) || !strings.HasSuffix(fcfg.Path, id) {
 		t.Error("expected shared, or wrong path", id, label, fcfg.Path)
 	}
@@ -1297,14 +1218,7 @@ func TestAutoAcceptPausedWhenFolderConfigChanged(t *testing.T) {
 		t.Fatal("folder running?")
 	}
 
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID:    id,
-				Label: id,
-			},
-		},
-	})
+	m.ClusterConfig(device1, createClusterConfig(device1, id))
 	m.generateClusterConfig(device1)
 
 	if fcfg, ok := m.cfg.Folder(id); !ok {
@@ -1354,14 +1268,7 @@ func TestAutoAcceptPausedWhenFolderConfigNotChanged(t *testing.T) {
 		t.Fatal("folder running?")
 	}
 
-	m.ClusterConfig(device1, protocol.ClusterConfig{
-		Folders: []protocol.Folder{
-			{
-				ID:    id,
-				Label: id,
-			},
-		},
-	})
+	m.ClusterConfig(device1, createClusterConfig(device1, id))
 	m.generateClusterConfig(device1)
 
 	if fcfg, ok := m.cfg.Folder(id); !ok {
@@ -1379,6 +1286,113 @@ func TestAutoAcceptPausedWhenFolderConfigNotChanged(t *testing.T) {
 
 	if _, ok := m.folderRunners[id]; ok {
 		t.Error("folder started")
+	}
+}
+
+func TestAutoAcceptEnc(t *testing.T) {
+	tcfg := defaultAutoAcceptCfg.Copy()
+	m := newState(tcfg)
+	defer cleanupModel(m)
+
+	id := srand.String(8)
+	defer os.RemoveAll(id)
+
+	token := []byte("token")
+	basicCC := func() protocol.ClusterConfig {
+		return protocol.ClusterConfig{
+			Folders: []protocol.Folder{{
+				ID:    id,
+				Label: id,
+			}}}
+	}
+
+	// Earlier tests might cause the connection to get closed, thus ClusterConfig
+	// would panic.
+	clusterConfig := func(deviceID protocol.DeviceID, cm protocol.ClusterConfig) {
+		m.AddConnection(&fakeConnection{id: deviceID, model: m}, protocol.Hello{})
+		m.ClusterConfig(deviceID, cm)
+	}
+
+	clusterConfig(device1, basicCC())
+	if _, ok := m.cfg.Folder(id); ok {
+		t.Fatal("unexpected added")
+	}
+	cc := basicCC()
+	cc.Folders[0].Devices = []protocol.Device{{ID: device1}}
+	clusterConfig(device1, cc)
+	if _, ok := m.cfg.Folder(id); ok {
+		t.Fatal("unexpected added")
+	}
+	cc = basicCC()
+	cc.Folders[0].Devices = []protocol.Device{{ID: myID}}
+	clusterConfig(device1, cc)
+	if _, ok := m.cfg.Folder(id); ok {
+		t.Fatal("unexpected added")
+	}
+
+	// New folder, encrypted -> add as enc
+
+	cc = createClusterConfig(device1, id)
+	cc.Folders[0].Devices[1].EncryptionPasswordToken = token
+	clusterConfig(device1, cc)
+	if cfg, ok := m.cfg.Folder(id); !ok {
+		t.Fatal("unexpected unadded")
+	} else {
+		if !cfg.SharedWith(device1) {
+			t.Fatal("unexpected unshared")
+		}
+		if cfg.Type != config.FolderTypeReceiveEncrypted {
+			t.Fatal("Folder not added as receiveEncrypted")
+		}
+	}
+
+	// New device, unencrypted on encrypted folder -> reject
+
+	clusterConfig(device2, createClusterConfig(device2, id))
+	if cfg, _ := m.cfg.Folder(id); cfg.SharedWith(device2) {
+		t.Fatal("unexpected shared")
+	}
+
+	// New device, encrypted on encrypted folder -> share
+
+	cc = createClusterConfig(device2, id)
+	cc.Folders[0].Devices[1].EncryptionPasswordToken = token
+	clusterConfig(device2, cc)
+	if cfg, _ := m.cfg.Folder(id); !cfg.SharedWith(device2) {
+		t.Fatal("unexpected unshared")
+	}
+
+	// New folder, no encrypted -> add "normal"
+
+	id = srand.String(8)
+	defer os.RemoveAll(id)
+
+	clusterConfig(device1, createClusterConfig(device1, id))
+	if cfg, ok := m.cfg.Folder(id); !ok {
+		t.Fatal("unexpected unadded")
+	} else {
+		if !cfg.SharedWith(device1) {
+			t.Fatal("unexpected unshared")
+		}
+		if cfg.Type != config.FolderTypeSendReceive {
+			t.Fatal("Folder not added as send-receive")
+		}
+	}
+
+	// New device, encrypted on unencrypted folder -> reject
+
+	cc = createClusterConfig(device2, id)
+	cc.Folders[0].Devices[1].EncryptionPasswordToken = token
+	clusterConfig(device2, cc)
+	if cfg, _ := m.cfg.Folder(id); cfg.SharedWith(device2) {
+		t.Fatal("unexpected shared")
+	}
+
+	// New device, unencrypted on unencrypted folder -> share
+
+	clusterConfig(device2, createClusterConfig(device2, id))
+	if cfg, _ := m.cfg.Folder(id); !cfg.SharedWith(device2) {
+		t.Fatal("unexpected unshared")
 	}
 }
 
@@ -1475,7 +1489,7 @@ func TestIgnores(t *testing.T) {
 
 	// Invalid path, marker should be missing, hence returns an error.
 	fcfg := config.FolderConfiguration{ID: "fresh", Path: "XXX"}
-	ignores := ignore.New(fcfg.Filesystem(), ignore.WithCache(m.cacheIgnoredFiles))
+	ignores := ignore.New(fcfg.Filesystem(), ignore.WithCache(m.cfg.Options().CacheIgnoredFiles))
 	m.fmut.Lock()
 	m.folderCfgs[fcfg.ID] = fcfg
 	m.folderIgnores[fcfg.ID] = ignores
@@ -1490,7 +1504,7 @@ func TestIgnores(t *testing.T) {
 	pausedDefaultFolderConfig := defaultFolderConfig
 	pausedDefaultFolderConfig.Paused = true
 
-	m.restartFolder(defaultFolderConfig, pausedDefaultFolderConfig)
+	m.restartFolder(defaultFolderConfig, pausedDefaultFolderConfig, false)
 	// Here folder initialization is not an issue as a paused folder isn't
 	// added to the model and thus there is no initial scan happening.
 
@@ -1665,10 +1679,9 @@ func TestRWScanRecovery(t *testing.T) {
 }
 
 func TestGlobalDirectoryTree(t *testing.T) {
-	db := db.NewLowlevel(backend.OpenMemory())
-	m := newModel(defaultCfgWrapper, myID, "syncthing", "dev", db, nil)
-	m.ServeBackground()
-	defer cleanupModel(m)
+	w, fcfg := tmpDefaultWrapper()
+	m := setupModel(w)
+	defer cleanupModelAndRemoveDir(m, fcfg.Filesystem().URI())
 
 	b := func(isfile bool, path ...string) protocol.FileInfo {
 		typ := protocol.FileInfoTypeDirectory
@@ -1916,10 +1929,9 @@ func TestGlobalDirectoryTree(t *testing.T) {
 }
 
 func TestGlobalDirectorySelfFixing(t *testing.T) {
-	db := db.NewLowlevel(backend.OpenMemory())
-	m := newModel(defaultCfgWrapper, myID, "syncthing", "dev", db, nil)
-	m.ServeBackground()
-	defer cleanupModel(m)
+	w, fcfg := tmpDefaultWrapper()
+	m := setupModel(w)
+	defer cleanupModelAndRemoveDir(m, fcfg.Filesystem().URI())
 
 	b := func(isfile bool, path ...string) protocol.FileInfo {
 		typ := protocol.FileInfoTypeDirectory
@@ -2290,7 +2302,7 @@ func TestIndexesForUnknownDevicesDropped(t *testing.T) {
 	}
 
 	m := newModel(defaultCfgWrapper, myID, "syncthing", "dev", dbi, nil)
-	m.newFolder(defaultFolderConfig)
+	m.newFolder(defaultFolderConfig, false)
 	defer cleanupModel(m)
 
 	// Remote sequence is cached, hence need to recreated.
@@ -2313,9 +2325,9 @@ func TestSharedWithClearedOnDisconnect(t *testing.T) {
 	defer cleanupModel(m)
 
 	conn1 := &fakeConnection{id: device1, model: m}
-	m.AddConnection(conn1, protocol.HelloResult{})
+	m.AddConnection(conn1, protocol.Hello{})
 	conn2 := &fakeConnection{id: device2, model: m}
-	m.AddConnection(conn2, protocol.HelloResult{})
+	m.AddConnection(conn2, protocol.Hello{})
 
 	m.ClusterConfig(device1, protocol.ClusterConfig{
 		Folders: []protocol.Folder{
@@ -3243,14 +3255,14 @@ func TestRequestLimit(t *testing.T) {
 
 	file := "tmpfile"
 	befReq := time.Now()
-	first, err := m.Request(device1, "default", file, 2000, 0, nil, 0, false)
+	first, err := m.Request(device1, "default", file, 0, 2000, 0, nil, 0, false)
 	if err != nil {
 		t.Fatalf("First request failed: %v", err)
 	}
 	reqDur := time.Since(befReq)
 	returned := make(chan struct{})
 	go func() {
-		second, err := m.Request(device1, "default", file, 2000, 0, nil, 0, false)
+		second, err := m.Request(device1, "default", file, 0, 2000, 0, nil, 0, false)
 		if err != nil {
 			t.Errorf("Second request failed: %v", err)
 		}
@@ -3331,7 +3343,7 @@ func TestConnCloseOnRestart(t *testing.T) {
 
 	br := &testutils.BlockingRW{}
 	nw := &testutils.NoopRW{}
-	m.AddConnection(newFakeProtoConn(protocol.NewConnection(device1, br, nw, m, "testConn", protocol.CompressNever)), protocol.HelloResult{})
+	m.AddConnection(newFakeProtoConn(protocol.NewConnection(device1, br, nw, m, "testConn", protocol.CompressionNever)), protocol.Hello{})
 	m.pmut.RLock()
 	if len(m.closed) != 1 {
 		t.Fatalf("Expected just one conn (len(m.conn) == %v)", len(m.conn))
@@ -3339,17 +3351,19 @@ func TestConnCloseOnRestart(t *testing.T) {
 	closed := m.closed[device1]
 	m.pmut.RUnlock()
 
-	newFcfg := fcfg.Copy()
-	newFcfg.Paused = true
+	waiter, err := w.RemoveDevice(device1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan struct{})
 	go func() {
-		m.restartFolder(fcfg, newFcfg)
+		waiter.Wait()
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Timed out before folder restart returned")
+		t.Fatal("Timed out before config took effect")
 	}
 	select {
 	case <-closed:
@@ -3845,12 +3859,15 @@ func TestScanRenameCaseOnly(t *testing.T) {
 	})
 }
 
-func TestConnectionTerminationOnFolderAdd(t *testing.T) {
-	testConfigChangeClosesConnections(t, false, true, nil, func(cfg config.Wrapper) {
+func TestClusterConfigOnFolderAdd(t *testing.T) {
+	testConfigChangeTriggersClusterConfigs(t, false, true, nil, func(cfg config.Wrapper) {
 		fcfg := testFolderConfigTmp()
 		fcfg.ID = "second"
 		fcfg.Label = "second"
-		fcfg.Devices = []config.FolderDeviceConfiguration{{device2, protocol.EmptyDeviceID}}
+		fcfg.Devices = []config.FolderDeviceConfiguration{{
+			DeviceID:     device2,
+			IntroducedBy: protocol.EmptyDeviceID,
+		}}
 		if w, err := cfg.SetFolder(fcfg); err != nil {
 			t.Fatal(err)
 		} else {
@@ -3859,10 +3876,13 @@ func TestConnectionTerminationOnFolderAdd(t *testing.T) {
 	})
 }
 
-func TestConnectionTerminationOnFolderShare(t *testing.T) {
-	testConfigChangeClosesConnections(t, true, true, nil, func(cfg config.Wrapper) {
+func TestClusterConfigOnFolderShare(t *testing.T) {
+	testConfigChangeTriggersClusterConfigs(t, true, true, nil, func(cfg config.Wrapper) {
 		fcfg := cfg.FolderList()[0]
-		fcfg.Devices = []config.FolderDeviceConfiguration{{device2, protocol.EmptyDeviceID}}
+		fcfg.Devices = []config.FolderDeviceConfiguration{{
+			DeviceID:     device2,
+			IntroducedBy: protocol.EmptyDeviceID,
+		}}
 		if w, err := cfg.SetFolder(fcfg); err != nil {
 			t.Fatal(err)
 		} else {
@@ -3871,8 +3891,8 @@ func TestConnectionTerminationOnFolderShare(t *testing.T) {
 	})
 }
 
-func TestConnectionTerminationOnFolderUnshare(t *testing.T) {
-	testConfigChangeClosesConnections(t, true, false, nil, func(cfg config.Wrapper) {
+func TestClusterConfigOnFolderUnshare(t *testing.T) {
+	testConfigChangeTriggersClusterConfigs(t, true, false, nil, func(cfg config.Wrapper) {
 		fcfg := cfg.FolderList()[0]
 		fcfg.Devices = nil
 		if w, err := cfg.SetFolder(fcfg); err != nil {
@@ -3883,8 +3903,8 @@ func TestConnectionTerminationOnFolderUnshare(t *testing.T) {
 	})
 }
 
-func TestConnectionTerminationOnFolderRemove(t *testing.T) {
-	testConfigChangeClosesConnections(t, true, false, nil, func(cfg config.Wrapper) {
+func TestClusterConfigOnFolderRemove(t *testing.T) {
+	testConfigChangeTriggersClusterConfigs(t, true, false, nil, func(cfg config.Wrapper) {
 		rcfg := cfg.RawCopy()
 		rcfg.Folders = nil
 		if w, err := cfg.Replace(rcfg); err != nil {
@@ -3895,8 +3915,8 @@ func TestConnectionTerminationOnFolderRemove(t *testing.T) {
 	})
 }
 
-func TestConnectionTerminationOnFolderPause(t *testing.T) {
-	testConfigChangeClosesConnections(t, true, false, nil, func(cfg config.Wrapper) {
+func TestClusterConfigOnFolderPause(t *testing.T) {
+	testConfigChangeTriggersClusterConfigs(t, true, false, nil, func(cfg config.Wrapper) {
 		fcfg := cfg.FolderList()[0]
 		fcfg.Paused = true
 		if w, err := cfg.SetFolder(fcfg); err != nil {
@@ -3907,8 +3927,8 @@ func TestConnectionTerminationOnFolderPause(t *testing.T) {
 	})
 }
 
-func TestConnectionTerminationOnFolderUnpause(t *testing.T) {
-	testConfigChangeClosesConnections(t, true, false, func(cfg config.Wrapper) {
+func TestClusterConfigOnFolderUnpause(t *testing.T) {
+	testConfigChangeTriggersClusterConfigs(t, true, false, func(cfg config.Wrapper) {
 		fcfg := cfg.FolderList()[0]
 		fcfg.Paused = true
 		if w, err := cfg.SetFolder(fcfg); err != nil {
@@ -3929,16 +3949,16 @@ func TestConnectionTerminationOnFolderUnpause(t *testing.T) {
 
 func TestAddFolderCompletion(t *testing.T) {
 	// Empty folders are always 100% complete.
-	comp := newFolderCompletion(db.Counts{}, db.Counts{})
-	comp.add(newFolderCompletion(db.Counts{}, db.Counts{}))
+	comp := newFolderCompletion(db.Counts{}, db.Counts{}, 0)
+	comp.add(newFolderCompletion(db.Counts{}, db.Counts{}, 0))
 	if comp.CompletionPct != 100 {
 		t.Error(comp.CompletionPct)
 	}
 
 	// Completion is of the whole
-	comp = newFolderCompletion(db.Counts{Bytes: 100}, db.Counts{})             // 100% complete
-	comp.add(newFolderCompletion(db.Counts{Bytes: 400}, db.Counts{Bytes: 50})) // 82.5% complete
-	if comp.CompletionPct != 90 {                                              // 100 * (1 - 50/500)
+	comp = newFolderCompletion(db.Counts{Bytes: 100}, db.Counts{}, 0)             // 100% complete
+	comp.add(newFolderCompletion(db.Counts{Bytes: 400}, db.Counts{Bytes: 50}, 0)) // 82.5% complete
+	if comp.CompletionPct != 90 {                                                 // 100 * (1 - 50/500)
 		t.Error(comp.CompletionPct)
 	}
 }
@@ -3984,7 +4004,7 @@ func TestScanDeletedROChangedOnSR(t *testing.T) {
 	}
 }
 
-func testConfigChangeClosesConnections(t *testing.T, expectFirstClosed, expectSecondClosed bool, pre func(config.Wrapper), fn func(config.Wrapper)) {
+func testConfigChangeTriggersClusterConfigs(t *testing.T, expectFirst, expectSecond bool, pre func(config.Wrapper), fn func(config.Wrapper)) {
 	t.Helper()
 	wcfg, _ := tmpDefaultWrapper()
 	m := setupModel(wcfg)
@@ -3999,21 +4019,325 @@ func testConfigChangeClosesConnections(t *testing.T, expectFirstClosed, expectSe
 		pre(wcfg)
 	}
 
-	fc1 := &fakeConnection{id: device1, model: m}
-	fc2 := &fakeConnection{id: device2, model: m}
-	m.AddConnection(fc1, protocol.HelloResult{})
-	m.AddConnection(fc2, protocol.HelloResult{})
+	cc1 := make(chan struct{}, 1)
+	cc2 := make(chan struct{}, 1)
+	fc1 := &fakeConnection{
+		id:    device1,
+		model: m,
+		clusterConfigFn: func(_ protocol.ClusterConfig) {
+			cc1 <- struct{}{}
+		},
+	}
+	fc2 := &fakeConnection{
+		id:    device2,
+		model: m,
+		clusterConfigFn: func(_ protocol.ClusterConfig) {
+			cc2 <- struct{}{}
+		},
+	}
+	m.AddConnection(fc1, protocol.Hello{})
+	m.AddConnection(fc2, protocol.Hello{})
+
+	// Initial CCs
+	select {
+	case <-cc1:
+	default:
+		t.Fatal("missing initial CC from device1")
+	}
+	select {
+	case <-cc2:
+	default:
+		t.Fatal("missing initial CC from device2")
+	}
 
 	t.Log("Applying config change")
 
 	fn(wcfg)
 
-	if expectFirstClosed != fc1.closed {
-		t.Errorf("first connection state mismatch: %t (expected) != %t", expectFirstClosed, fc1.closed)
+	timeout := time.NewTimer(time.Second)
+	if expectFirst {
+		select {
+		case <-cc1:
+		case <-timeout.C:
+			t.Errorf("timed out before receiving cluste rconfig for first device")
+		}
+	}
+	if expectSecond {
+		select {
+		case <-cc2:
+		case <-timeout.C:
+			t.Errorf("timed out before receiving cluste rconfig for second device")
+		}
+	}
+}
+
+// The end result of the tested scenario is that the global version entry has an
+// empty version vector and is not deleted, while everything is actually deleted.
+// That then causes these files to be considered as needed, while they are not.
+// https://github.com/syncthing/syncthing/issues/6961
+func TestIssue6961(t *testing.T) {
+	wcfg, fcfg := tmpDefaultWrapper()
+	tfs := fcfg.Filesystem()
+	wcfg.SetDevice(config.NewDeviceConfiguration(device2, "device2"))
+	fcfg.Type = config.FolderTypeReceiveOnly
+	fcfg.Devices = append(fcfg.Devices, config.FolderDeviceConfiguration{DeviceID: device2})
+	wcfg.SetFolder(fcfg)
+	// Always recalc/repair when opening a fileset.
+	// db := db.NewLowlevel(backend.OpenMemory(), db.WithRecheckInterval(time.Millisecond))
+	db := db.NewLowlevel(backend.OpenMemory())
+	m := newModel(wcfg, myID, "syncthing", "dev", db, nil)
+	m.ServeBackground()
+	defer cleanupModelAndRemoveDir(m, tfs.URI())
+	m.ScanFolders()
+
+	name := "foo"
+	version := protocol.Vector{}.Update(device1.Short())
+
+	// Remote, valid and existing file
+	m.Index(device1, fcfg.ID, []protocol.FileInfo{{Name: name, Version: version, Sequence: 1}})
+	// Remote, invalid (receive-only) and existing file
+	m.Index(device2, fcfg.ID, []protocol.FileInfo{{Name: name, RawInvalid: true, Sequence: 1}})
+	// Create a local file
+	if fd, err := tfs.OpenFile(name, fs.OptCreate, 0666); err != nil {
+		t.Fatal(err)
+	} else {
+		fd.Close()
+	}
+	if info, err := tfs.Lstat(name); err != nil {
+		t.Fatal(err)
+	} else {
+		l.Infoln("intest", info.Mode)
+	}
+	m.ScanFolders()
+
+	// Get rid of valid global
+	waiter, err := wcfg.RemoveDevice(device1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter.Wait()
+
+	// Delete the local file
+	must(t, tfs.Remove(name))
+	m.ScanFolders()
+
+	// Drop ther remote index, add some other file.
+	m.Index(device2, fcfg.ID, []protocol.FileInfo{{Name: "bar", RawInvalid: true, Sequence: 1}})
+
+	// Pause and unpause folder to create new db.FileSet and thus recalculate everything
+	fcfg.Paused = true
+	waiter, err = wcfg.SetFolder(fcfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter.Wait()
+	fcfg.Paused = false
+	waiter, err = wcfg.SetFolder(fcfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiter.Wait()
+
+	if comp := m.Completion(device2, fcfg.ID); comp.NeedDeletes != 0 {
+		t.Error("Expected 0 needed deletes, got", comp.NeedDeletes)
+	} else {
+		t.Log(comp)
+	}
+}
+
+func TestCompletionEmptyGlobal(t *testing.T) {
+	wcfg, fcfg := tmpDefaultWrapper()
+	m := setupModel(wcfg)
+	defer cleanupModelAndRemoveDir(m, fcfg.Filesystem().URI())
+	files := []protocol.FileInfo{{Name: "foo", Version: protocol.Vector{}.Update(myID.Short()), Sequence: 1}}
+	m.fmut.Lock()
+	m.folderFiles[fcfg.ID].Update(protocol.LocalDeviceID, files)
+	m.fmut.Unlock()
+	files[0].Deleted = true
+	files[0].Version = files[0].Version.Update(device1.Short())
+	m.IndexUpdate(device1, fcfg.ID, files)
+	comp := m.Completion(protocol.LocalDeviceID, fcfg.ID)
+	if comp.CompletionPct != 95 {
+		t.Error("Expected completion of 95%, got", comp.CompletionPct)
+	}
+}
+
+func TestNeedMetaAfterIndexReset(t *testing.T) {
+	w, fcfg := tmpDefaultWrapper()
+	waiter, _ := w.SetDevice(config.NewDeviceConfiguration(device2, "device2"))
+	waiter.Wait()
+	fcfg.Devices = append(fcfg.Devices, config.FolderDeviceConfiguration{DeviceID: device2})
+	waiter, _ = w.SetFolder(fcfg)
+	waiter.Wait()
+	m := setupModel(w)
+	defer cleanupModelAndRemoveDir(m, fcfg.Path)
+
+	var seq int64 = 1
+	files := []protocol.FileInfo{{Name: "foo", Size: 10, Version: protocol.Vector{}.Update(device1.Short()), Sequence: seq}}
+
+	// Start with two remotes having one file, then both deleting it, then
+	// only one adding it again.
+	m.Index(device1, fcfg.ID, files)
+	m.Index(device2, fcfg.ID, files)
+	seq++
+	files[0].SetDeleted(device2.Short())
+	files[0].Sequence = seq
+	m.IndexUpdate(device2, fcfg.ID, files)
+	m.IndexUpdate(device1, fcfg.ID, files)
+	seq++
+	files[0].Deleted = false
+	files[0].Size = 20
+	files[0].Version = files[0].Version.Update(device1.Short())
+	files[0].Sequence = seq
+	m.IndexUpdate(device1, fcfg.ID, files)
+
+	if comp := m.Completion(device2, fcfg.ID); comp.NeedItems != 1 {
+		t.Error("Expected one needed item for device2, got", comp.NeedItems)
 	}
 
-	if expectSecondClosed != fc2.closed {
-		t.Errorf("second connection state mismatch: %t (expected) != %t", expectSecondClosed, fc2.closed)
+	// Pretend we had an index reset on device 1
+	m.Index(device1, fcfg.ID, files)
+	if comp := m.Completion(device2, fcfg.ID); comp.NeedItems != 1 {
+		t.Error("Expected one needed item for device2, got", comp.NeedItems)
+	}
+}
+
+func TestCcCheckEncryption(t *testing.T) {
+	w, fcfg := tmpDefaultWrapper()
+	m := setupModel(w)
+	m.Stop()
+	defer cleanupModel(m)
+
+	pw := "foo"
+	token := protocol.PasswordToken(fcfg.ID, pw)
+	m.folderEncryptionPasswordTokens[fcfg.ID] = token
+
+	testCases := []struct {
+		tokenRemote, tokenLocal             []byte
+		isEncryptedRemote, isEncryptedLocal bool
+		expectedErr                         error
+	}{
+		{
+			tokenRemote: token,
+			tokenLocal:  token,
+			expectedErr: errEncryptionInvConfigRemote,
+		},
+		{
+			isEncryptedRemote: true,
+			isEncryptedLocal:  true,
+			expectedErr:       errEncryptionInvConfigLocal,
+		},
+		{
+			tokenRemote:       token,
+			tokenLocal:        nil,
+			isEncryptedRemote: false,
+			isEncryptedLocal:  false,
+			expectedErr:       errEncryptionNotEncryptedLocal,
+		},
+		{
+			tokenRemote:       token,
+			tokenLocal:        nil,
+			isEncryptedRemote: true,
+			isEncryptedLocal:  false,
+			expectedErr:       nil,
+		},
+		{
+			tokenRemote:       token,
+			tokenLocal:        nil,
+			isEncryptedRemote: false,
+			isEncryptedLocal:  true,
+			expectedErr:       nil,
+		},
+		{
+			tokenRemote:       nil,
+			tokenLocal:        token,
+			isEncryptedRemote: true,
+			isEncryptedLocal:  false,
+			expectedErr:       nil,
+		},
+		{
+			tokenRemote:       nil,
+			tokenLocal:        token,
+			isEncryptedRemote: false,
+			isEncryptedLocal:  true,
+			expectedErr:       nil,
+		},
+		{
+			tokenRemote:       nil,
+			tokenLocal:        token,
+			isEncryptedRemote: false,
+			isEncryptedLocal:  false,
+			expectedErr:       errEncryptionNotEncryptedLocal,
+		},
+		{
+			tokenRemote:       nil,
+			tokenLocal:        nil,
+			isEncryptedRemote: true,
+			isEncryptedLocal:  false,
+			expectedErr:       errEncryptionNotEncryptedRemote,
+		},
+		{
+			tokenRemote:       nil,
+			tokenLocal:        nil,
+			isEncryptedRemote: false,
+			isEncryptedLocal:  true,
+			expectedErr:       errEncryptionNotEncryptedRemote,
+		},
+		{
+			tokenRemote:       nil,
+			tokenLocal:        nil,
+			isEncryptedRemote: false,
+			isEncryptedLocal:  false,
+			expectedErr:       nil,
+		},
+	}
+
+	for i, tc := range testCases {
+		tfcfg := fcfg.Copy()
+		if tc.isEncryptedLocal {
+			tfcfg.Type = config.FolderTypeReceiveEncrypted
+			m.folderEncryptionPasswordTokens[fcfg.ID] = token
+		}
+		dcfg := config.FolderDeviceConfiguration{DeviceID: device1}
+		if tc.isEncryptedRemote {
+			dcfg.EncryptionPassword = pw
+		}
+
+		deviceInfos := &indexSenderStartInfo{
+			remote: protocol.Device{ID: device1, EncryptionPasswordToken: tc.tokenRemote},
+			local:  protocol.Device{ID: myID, EncryptionPasswordToken: tc.tokenLocal},
+		}
+		err := m.ccCheckEncryption(tfcfg, dcfg, deviceInfos, false)
+		if err != tc.expectedErr {
+			t.Errorf("Testcase %v: Expected error %v, got %v", i, tc.expectedErr, err)
+		}
+
+		if tc.expectedErr == nil {
+			err := m.ccCheckEncryption(tfcfg, dcfg, deviceInfos, true)
+			if tc.isEncryptedRemote || tc.isEncryptedLocal {
+				if err != nil {
+					t.Errorf("Testcase %v: Expected no error, got %v", i, err)
+				}
+			} else {
+				if err != errEncryptionNotEncryptedUntrusted {
+					t.Errorf("Testcase %v: Expected error %v, got %v", i, errEncryptionNotEncryptedUntrusted, err)
+				}
+			}
+		}
+
+		if err != nil || (!tc.isEncryptedRemote && !tc.isEncryptedLocal) {
+			continue
+		}
+
+		if tc.isEncryptedLocal {
+			m.folderEncryptionPasswordTokens[fcfg.ID] = []byte("notAMatch")
+		} else {
+			dcfg.EncryptionPassword = "notAMatch"
+		}
+		err = m.ccCheckEncryption(tfcfg, dcfg, deviceInfos, false)
+		if err != errEncryptionPassword {
+			t.Errorf("Testcase %v: Expected error %v, got %v", i, errEncryptionPassword, err)
+		}
 	}
 }
 

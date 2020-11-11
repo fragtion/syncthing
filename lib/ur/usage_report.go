@@ -164,11 +164,11 @@ func (s *Service) reportData(ctx context.Context, urVersion int, preview bool) (
 			report.DeviceUses.CustomCertName++
 		}
 		switch cfg.Compression {
-		case protocol.CompressAlways:
+		case protocol.CompressionAlways:
 			report.DeviceUses.CompressAlways++
-		case protocol.CompressMetadata:
+		case protocol.CompressionMetadata:
 			report.DeviceUses.CompressMetadata++
-		case protocol.CompressNever:
+		case protocol.CompressionNever:
 			report.DeviceUses.CompressNever++
 		default:
 			l.Warnf("Unhandled versioning type for usage reports: %s", cfg.Compression)
@@ -206,8 +206,8 @@ func (s *Service) reportData(ctx context.Context, urVersion int, preview bool) (
 
 	report.UsesRateLimit = opts.MaxRecvKbps > 0 || opts.MaxSendKbps > 0
 	report.UpgradeAllowedManual = !(upgrade.DisabledByCompilation || s.noUpgrade)
-	report.UpgradeAllowedAuto = !(upgrade.DisabledByCompilation || s.noUpgrade) && opts.AutoUpgradeIntervalH > 0
-	report.UpgradeAllowedPre = !(upgrade.DisabledByCompilation || s.noUpgrade) && opts.AutoUpgradeIntervalH > 0 && opts.UpgradeToPreReleases
+	report.UpgradeAllowedAuto = !(upgrade.DisabledByCompilation || s.noUpgrade) && opts.AutoUpgradeEnabled()
+	report.UpgradeAllowedPre = !(upgrade.DisabledByCompilation || s.noUpgrade) && opts.AutoUpgradeEnabled() && opts.UpgradeToPreReleases
 
 	// V3
 
@@ -274,6 +274,12 @@ func (s *Service) reportData(ctx context.Context, urVersion int, preview bool) (
 			}
 		}
 		sort.Ints(report.FolderUsesV3.FsWatcherDelays)
+
+		for _, cfg := range s.cfg.Devices() {
+			if cfg.Untrusted {
+				report.DeviceUsesV3.Untrusted++
+			}
+		}
 
 		guiCfg := s.cfg.GUI()
 		// Anticipate multiple GUI configs in the future, hence store counts.

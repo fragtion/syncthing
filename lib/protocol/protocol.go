@@ -115,7 +115,7 @@ type Model interface {
 	// An index update was received from the peer device
 	IndexUpdate(deviceID DeviceID, folder string, files []FileInfo) error
 	// A request was made by the peer device
-	Request(deviceID DeviceID, folder, name string, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (RequestResponse, error)
+	Request(deviceID DeviceID, folder, name string, blockNo, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (RequestResponse, error)
 	// A cluster configuration message was received
 	ClusterConfig(deviceID DeviceID, config ClusterConfig) error
 	// The peer device closed the connection
@@ -137,7 +137,7 @@ type Connection interface {
 	Name() string
 	Index(ctx context.Context, folder string, files []FileInfo) error
 	IndexUpdate(ctx context.Context, folder string, files []FileInfo) error
-	Request(ctx context.Context, folder string, name string, offset int64, size int, hash []byte, weakHash uint32, fromTemporary bool) ([]byte, error)
+	Request(ctx context.Context, folder string, name string, blockNo int, offset int64, size int, hash []byte, weakHash uint32, fromTemporary bool) ([]byte, error)
 	ClusterConfig(config ClusterConfig)
 	DownloadProgress(ctx context.Context, folder string, updates []FileDownloadProgressUpdate)
 	Statistics() Statistics
@@ -153,12 +153,12 @@ type rawConnection struct {
 	cr *countingReader
 	cw *countingWriter
 
-	awaiting    map[int32]chan asyncResult
+	awaiting    map[int]chan asyncResult
 	awaitingMut sync.Mutex
 
 	idxMut sync.Mutex // ensures serialization of Index calls
 
-	nextID    int32
+	nextID    int
 	nextIDMut sync.Mutex
 
 	inbox                 chan message
@@ -204,16 +204,39 @@ const (
 var CloseTimeout = 10 * time.Second
 
 func NewConnection(deviceID DeviceID, reader io.Reader, writer io.Writer, receiver Model, name string, compress Compression) Connection {
+	receiver = nativeModel{receiver}
+	rc := newRawConnection(deviceID, reader, writer, receiver, name, compress)
+	return wireFormatConnection{rc}
+}
+
+func NewEncryptedConnection(passwords map[string]string, deviceID DeviceID, reader io.Reader, writer io.Writer, receiver Model, name string, compress Compression) Connection {
+	keys := keysFromPasswords(passwords)
+
+	// Encryption / decryption is first (outermost) before conversion to
+	// native path formats.
+	nm := nativeModel{receiver}
+	em := encryptedModel{model: nm, folderKeys: keys}
+
+	// We do the wire format conversion first (outermost) so that the
+	// metadata is in wire format when it reaches the encryption step.
+	rc := newRawConnection(deviceID, reader, writer, em, name, compress)
+	ec := encryptedConnection{conn: rc, folderKeys: keys}
+	wc := wireFormatConnection{ec}
+
+	return wc
+}
+
+func newRawConnection(deviceID DeviceID, reader io.Reader, writer io.Writer, receiver Model, name string, compress Compression) *rawConnection {
 	cr := &countingReader{Reader: reader}
 	cw := &countingWriter{Writer: writer}
 
-	c := rawConnection{
+	return &rawConnection{
 		id:                    deviceID,
 		name:                  name,
-		receiver:              nativeModel{receiver},
+		receiver:              receiver,
 		cr:                    cr,
 		cw:                    cw,
-		awaiting:              make(map[int32]chan asyncResult),
+		awaiting:              make(map[int]chan asyncResult),
 		inbox:                 make(chan message),
 		outbox:                make(chan asyncMessage),
 		closeBox:              make(chan asyncMessage),
@@ -222,8 +245,6 @@ func NewConnection(deviceID DeviceID, reader io.Reader, writer io.Writer, receiv
 		closed:                make(chan struct{}),
 		compression:           compress,
 	}
-
-	return wireFormatConnection{&c}
 }
 
 // Start creates the goroutines for sending and receiving of messages. It must
@@ -281,7 +302,7 @@ func (c *rawConnection) IndexUpdate(ctx context.Context, folder string, idx []Fi
 }
 
 // Request returns the bytes for the specified block after fetching them from the connected peer.
-func (c *rawConnection) Request(ctx context.Context, folder string, name string, offset int64, size int, hash []byte, weakHash uint32, fromTemporary bool) ([]byte, error) {
+func (c *rawConnection) Request(ctx context.Context, folder string, name string, blockNo int, offset int64, size int, hash []byte, weakHash uint32, fromTemporary bool) ([]byte, error) {
 	c.nextIDMut.Lock()
 	id := c.nextID
 	c.nextID++
@@ -301,7 +322,8 @@ func (c *rawConnection) Request(ctx context.Context, folder string, name string,
 		Folder:        folder,
 		Name:          name,
 		Offset:        offset,
-		Size:          int32(size),
+		Size:          size,
+		BlockNo:       blockNo,
 		Hash:          hash,
 		WeakHash:      weakHash,
 		FromTemporary: fromTemporary,
@@ -322,11 +344,9 @@ func (c *rawConnection) Request(ctx context.Context, folder string, name string,
 }
 
 // ClusterConfig sends the cluster configuration message to the peer.
-// It must be called just once (as per BEP), otherwise it will panic.
 func (c *rawConnection) ClusterConfig(config ClusterConfig) {
 	select {
 	case c.clusterConfigBox <- &config:
-		close(c.clusterConfigBox)
 	case <-c.closed:
 	}
 }
@@ -386,13 +406,12 @@ func (c *rawConnection) dispatcherLoop() (err error) {
 		switch msg := msg.(type) {
 		case *ClusterConfig:
 			l.Debugln("read ClusterConfig message")
-			if state != stateInitial {
-				return fmt.Errorf("protocol error: cluster config message in state %d", state)
+			if state == stateInitial {
+				state = stateReady
 			}
 			if err := c.receiver.ClusterConfig(c.id, *msg); err != nil {
 				return errors.Wrap(err, "receiver error")
 			}
-			state = stateReady
 
 		case *Index:
 			l.Debugln("read Index message")
@@ -625,7 +644,7 @@ func checkFilename(name string) error {
 }
 
 func (c *rawConnection) handleRequest(req Request) {
-	res, err := c.receiver.Request(c.id, req.Folder, req.Name, req.Size, req.Offset, req.Hash, req.WeakHash, req.FromTemporary)
+	res, err := c.receiver.Request(c.id, req.Folder, req.Name, int32(req.BlockNo), int32(req.Size), req.Offset, req.Hash, req.WeakHash, req.FromTemporary)
 	if err != nil {
 		c.send(context.Background(), &Response{
 			ID:   req.ID,
@@ -683,6 +702,12 @@ func (c *rawConnection) writerLoop() {
 	}
 	for {
 		select {
+		case cc := <-c.clusterConfigBox:
+			err := c.writeMessage(cc)
+			if err != nil {
+				c.internalClose(err)
+				return
+			}
 		case hm := <-c.outbox:
 			err := c.writeMessage(hm.msg)
 			if hm.done != nil {
@@ -797,21 +822,21 @@ func (c *rawConnection) writeUncompressedMessage(msg message) error {
 func (c *rawConnection) typeOf(msg message) MessageType {
 	switch msg.(type) {
 	case *ClusterConfig:
-		return messageTypeClusterConfig
+		return MessageTypeClusterConfig
 	case *Index:
-		return messageTypeIndex
+		return MessageTypeIndex
 	case *IndexUpdate:
-		return messageTypeIndexUpdate
+		return MessageTypeIndexUpdate
 	case *Request:
-		return messageTypeRequest
+		return MessageTypeRequest
 	case *Response:
-		return messageTypeResponse
+		return MessageTypeResponse
 	case *DownloadProgress:
-		return messageTypeDownloadProgress
+		return MessageTypeDownloadProgress
 	case *Ping:
-		return messageTypePing
+		return MessageTypePing
 	case *Close:
-		return messageTypeClose
+		return MessageTypeClose
 	default:
 		panic("bug: unknown message type")
 	}
@@ -819,21 +844,21 @@ func (c *rawConnection) typeOf(msg message) MessageType {
 
 func (c *rawConnection) newMessage(t MessageType) (message, error) {
 	switch t {
-	case messageTypeClusterConfig:
+	case MessageTypeClusterConfig:
 		return new(ClusterConfig), nil
-	case messageTypeIndex:
+	case MessageTypeIndex:
 		return new(Index), nil
-	case messageTypeIndexUpdate:
+	case MessageTypeIndexUpdate:
 		return new(IndexUpdate), nil
-	case messageTypeRequest:
+	case MessageTypeRequest:
 		return new(Request), nil
-	case messageTypeResponse:
+	case MessageTypeResponse:
 		return new(Response), nil
-	case messageTypeDownloadProgress:
+	case MessageTypeDownloadProgress:
 		return new(DownloadProgress), nil
-	case messageTypePing:
+	case MessageTypePing:
 		return new(Ping), nil
-	case messageTypeClose:
+	case MessageTypeClose:
 		return new(Close), nil
 	default:
 		return nil, errUnknownMessage
@@ -842,14 +867,14 @@ func (c *rawConnection) newMessage(t MessageType) (message, error) {
 
 func (c *rawConnection) shouldCompressMessage(msg message) bool {
 	switch c.compression {
-	case CompressNever:
+	case CompressionNever:
 		return false
 
-	case CompressAlways:
+	case CompressionAlways:
 		// Use compression for large enough messages
 		return msg.ProtoSize() >= compressionThreshold
 
-	case CompressMetadata:
+	case CompressionMetadata:
 		_, isResponse := msg.(*Response)
 		// Compress if it's large enough and not a response message
 		return !isResponse && msg.ProtoSize() >= compressionThreshold

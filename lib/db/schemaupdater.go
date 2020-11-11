@@ -27,9 +27,14 @@ import (
 //   8-9: v1.4.0
 //   10-11: v1.6.0
 //   12-13: v1.7.0
+//   14: v1.9.0
+//
+// dbMigrationVersion is for migrations that do not change the schema and thus
+// do not put restrictions on downgrades (e.g. for repairs after a bugfix).
 const (
-	dbVersion             = 13
-	dbMinSyncthingVersion = "v1.7.0"
+	dbVersion             = 14
+	dbMigrationVersion    = 15
+	dbMinSyncthingVersion = "v1.9.0"
 )
 
 var errFolderMissing = errors.New("folder present in global list but missing in keyer index")
@@ -45,6 +50,8 @@ func (e *databaseDowngradeError) Error() string {
 	return fmt.Sprintf("Syncthing %s required", e.minSyncthingVersion)
 }
 
+// UpdateSchema updates a possibly outdated database to the current schema and
+// also does repairs where necessary.
 func UpdateSchema(db *Lowlevel) error {
 	updater := &schemaUpdater{db}
 	return updater.updateSchema()
@@ -76,32 +83,44 @@ func (db *schemaUpdater) updateSchema() error {
 		return err
 	}
 
-	if prevVersion == dbVersion {
+	prevMigration, _, err := miscDB.Int64("dbMigrationVersion")
+	if err != nil {
+		return err
+	}
+	// Cover versions before adding `dbMigrationVersion` (== 0) and possible future weirdness.
+	if prevMigration < prevVersion {
+		prevMigration = prevVersion
+	}
+
+	if prevVersion == dbVersion && prevMigration >= dbMigrationVersion {
 		return nil
 	}
 
 	type migration struct {
-		schemaVersion int64
-		migration     func(prevVersion int) error
+		schemaVersion    int64
+		migrationVersion int64
+		migration        func(prevSchema int) error
 	}
 	var migrations = []migration{
-		{1, db.updateSchema0to1},
-		{2, db.updateSchema1to2},
-		{3, db.updateSchema2to3},
-		{5, db.updateSchemaTo5},
-		{6, db.updateSchema5to6},
-		{7, db.updateSchema6to7},
-		{9, db.updateSchemaTo9},
-		{10, db.updateSchemaTo10},
-		{11, db.updateSchemaTo11},
-		{13, db.updateSchemaTo13},
+		{1, 1, db.updateSchema0to1},
+		{2, 2, db.updateSchema1to2},
+		{3, 3, db.updateSchema2to3},
+		{5, 5, db.updateSchemaTo5},
+		{6, 6, db.updateSchema5to6},
+		{7, 7, db.updateSchema6to7},
+		{9, 9, db.updateSchemaTo9},
+		{10, 10, db.updateSchemaTo10},
+		{11, 11, db.updateSchemaTo11},
+		{13, 13, db.updateSchemaTo13},
+		{14, 14, db.updateSchemaTo14},
+		{14, 15, db.migration15},
 	}
 
 	for _, m := range migrations {
-		if prevVersion < m.schemaVersion {
-			l.Infof("Migrating database to schema version %d...", m.schemaVersion)
+		if prevMigration < m.migrationVersion {
+			l.Infof("Running database migration %d...", m.migrationVersion)
 			if err := m.migration(int(prevVersion)); err != nil {
-				return fmt.Errorf("failed migrating to version %v: %w", m.schemaVersion, err)
+				return fmt.Errorf("failed to do migration %v: %w", m.migrationVersion, err)
 			}
 		}
 	}
@@ -110,6 +129,9 @@ func (db *schemaUpdater) updateSchema() error {
 		return err
 	}
 	if err := miscDB.PutString("dbMinSyncthingVersion", dbMinSyncthingVersion); err != nil {
+		return err
+	}
+	if err := miscDB.PutInt64("dbMigrationVersion", dbMigrationVersion); err != nil {
 		return err
 	}
 
@@ -196,7 +218,7 @@ func (db *schemaUpdater) updateSchema0to1(_ int) error {
 			// probably can't happen
 			continue
 		}
-		if f.Type == protocol.FileInfoTypeDeprecatedSymlinkDirectory || f.Type == protocol.FileInfoTypeDeprecatedSymlinkFile {
+		if f.Type == protocol.FileInfoTypeSymlinkDirectory || f.Type == protocol.FileInfoTypeSymlinkFile {
 			f.Type = protocol.FileInfoTypeSymlink
 			bs, err := f.Marshal()
 			if err != nil {
@@ -537,7 +559,7 @@ func (db *schemaUpdater) rewriteFiles(t readWriteTransaction) error {
 		if fi.Blocks == nil {
 			continue
 		}
-		if err := t.putFile(it.Key(), fi, false); err != nil {
+		if err := t.putFile(it.Key(), fi); err != nil {
 			return err
 		}
 		if err := t.Checkpoint(); err != nil {
@@ -681,6 +703,79 @@ func (db *schemaUpdater) updateSchemaTo13(prev int) error {
 	}
 
 	return t.Commit()
+}
+
+func (db *schemaUpdater) updateSchemaTo14(_ int) error {
+	// Checks for missing blocks and marks those entries as requiring a
+	// rehash/being invalid. The db is checked/repaired afterwards, i.e.
+	// no care is taken to get metadata and sequences right.
+	// If the corresponding files changed on disk compared to the global
+	// version, this will cause a conflict.
+
+	var key, gk []byte
+	for _, folderStr := range db.ListFolders() {
+		folder := []byte(folderStr)
+		meta := newMetadataTracker(db.keyer)
+		meta.counts.Created = 0 // Recalculate metadata afterwards
+
+		t, err := db.newReadWriteTransaction(meta.CommitHook(folder))
+		if err != nil {
+			return err
+		}
+		defer t.close()
+
+		key, err = t.keyer.GenerateDeviceFileKey(key, folder, protocol.LocalDeviceID[:], nil)
+		it, err := t.NewPrefixIterator(key)
+		if err != nil {
+			return err
+		}
+		defer it.Release()
+		for it.Next() {
+			var fi protocol.FileInfo
+			if err := fi.Unmarshal(it.Value()); err != nil {
+				return err
+			}
+			if len(fi.Blocks) > 0 || len(fi.BlocksHash) == 0 {
+				continue
+			}
+			key = t.keyer.GenerateBlockListKey(key, fi.BlocksHash)
+			_, err := t.Get(key)
+			if err == nil {
+				continue
+			}
+
+			fi.SetMustRescan(protocol.LocalDeviceID.Short())
+			if err = t.putFile(it.Key(), fi); err != nil {
+				return err
+			}
+
+			gk, err = t.keyer.GenerateGlobalVersionKey(gk, folder, []byte(fi.Name))
+			if err != nil {
+				return err
+			}
+			key, _, err = t.updateGlobal(gk, key, folder, protocol.LocalDeviceID[:], fi, meta)
+			if err != nil {
+				return err
+			}
+		}
+		it.Release()
+
+		if err = t.Commit(); err != nil {
+			return err
+		}
+		t.close()
+	}
+
+	return nil
+}
+
+func (db *schemaUpdater) migration15(_ int) error {
+	for _, folder := range db.ListFolders() {
+		if _, err := db.recalcMeta(folder); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (db *schemaUpdater) rewriteGlobals(t readWriteTransaction) error {

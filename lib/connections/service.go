@@ -149,7 +149,7 @@ func NewService(cfg config.Wrapper, myID protocol.DeviceID, mdl Model, tlsCfg *t
 		conns:                make(chan internalConn),
 		bepProtocolName:      bepProtocolName,
 		tlsDefaultCommonName: tlsDefaultCommonName,
-		limiter:              newLimiter(cfg),
+		limiter:              newLimiter(myID, cfg),
 		natService:           nat.NewService(myID, cfg),
 		evLogger:             evLogger,
 
@@ -324,7 +324,13 @@ func (s *service) handle(ctx context.Context) {
 		isLAN := s.isLAN(c.RemoteAddr())
 		rd, wr := s.limiter.getLimiters(remoteID, c, isLAN)
 
-		protoConn := protocol.NewConnection(remoteID, rd, wr, s.model, c.String(), deviceCfg.Compression)
+		var protoConn protocol.Connection
+		passwords := s.cfg.FolderPasswords(remoteID)
+		if len(passwords) > 0 {
+			protoConn = protocol.NewEncryptedConnection(passwords, remoteID, rd, wr, s.model, c.String(), deviceCfg.Compression)
+		} else {
+			protoConn = protocol.NewConnection(remoteID, rd, wr, s.model, c.String(), deviceCfg.Compression)
+		}
 		modelConn := completeConn{c, protoConn}
 
 		l.Infof("Established secure connection to %s at %s", remoteID, c)
@@ -675,6 +681,9 @@ func (s *service) AllAddresses() []string {
 }
 
 func (s *service) ExternalAddresses() []string {
+	if s.cfg.Options().AnnounceLANAddresses {
+		return s.AllAddresses()
+	}
 	s.listenersMut.RLock()
 	var addrs []string
 	for _, listener := range s.listeners {

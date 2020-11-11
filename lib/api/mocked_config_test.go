@@ -28,6 +28,10 @@ func (c *mockedConfig) LDAP() config.LDAPConfiguration {
 	return config.LDAPConfiguration{}
 }
 
+func (c *mockedConfig) SetLDAP(config.LDAPConfiguration) (config.Waiter, error) {
+	return noopWaiter{}, nil
+}
+
 func (c *mockedConfig) RawCopy() config.Configuration {
 	cfg := config.Configuration{}
 	util.SetDefaults(&cfg.Options)
@@ -54,6 +58,10 @@ func (c *mockedConfig) Devices() map[protocol.DeviceID]config.DeviceConfiguratio
 	return nil
 }
 
+func (c *mockedConfig) DeviceList() []config.DeviceConfiguration {
+	return nil
+}
+
 func (c *mockedConfig) SetDevice(config.DeviceConfiguration) (config.Waiter, error) {
 	return noopWaiter{}, nil
 }
@@ -73,10 +81,6 @@ func (c *mockedConfig) RequiresRestart() bool {
 func (c *mockedConfig) AddOrUpdatePendingDevice(device protocol.DeviceID, name, address string) {}
 
 func (c *mockedConfig) AddOrUpdatePendingFolder(id, label string, device protocol.DeviceID) {}
-
-func (c *mockedConfig) MyName() string {
-	return ""
-}
 
 func (c *mockedConfig) ConfigPath() string {
 	return ""
@@ -104,6 +108,14 @@ func (c *mockedConfig) SetFolder(fld config.FolderConfiguration) (config.Waiter,
 
 func (c *mockedConfig) SetFolders(folders []config.FolderConfiguration) (config.Waiter, error) {
 	return noopWaiter{}, nil
+}
+
+func (c *mockedConfig) RemoveFolder(id string) (config.Waiter, error) {
+	return noopWaiter{}, nil
+}
+
+func (c *mockedConfig) FolderPasswords(device protocol.DeviceID) map[string]string {
+	return nil
 }
 
 func (c *mockedConfig) Device(id protocol.DeviceID) (config.DeviceConfiguration, bool) {

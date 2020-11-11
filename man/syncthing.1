@@ -1,6 +1,6 @@
 .\" Man page generated from reStructuredText.
 .
-.TH "SYNCTHING" "1" "Aug 04, 2020" "v1" "Syncthing"
+.TH "SYNCTHING" "1" "Nov 02, 2020" "v1" "Syncthing"
 .SH NAME
 syncthing \- Syncthing
 .
@@ -38,7 +38,8 @@ level margin: \\n[rst2man-indent\\n[rst2man-indent-level]]
 .ft C
 syncthing [\-audit] [\-auditfile=<file|\-|\-\->] [\-browser\-only] [device\-id]
           [\-generate=<dir>] [\-gui\-address=<address>] [\-gui\-apikey=<key>]
-          [\-home=<dir>] [\-logfile=<filename>] [\-logflags=<flags>]
+          [\-home=<dir> | \-config=<dir> \-data=<dir>]
+          [\-logfile=<filename>] [\-logflags=<flags>]
           [\-no\-browser] [\-no\-console] [\-no\-restart] [\-paths] [\-paused]
           [\-reset\-database] [\-reset\-deltas] [\-unpaused] [\-upgrade]
           [\-upgrade\-check] [\-upgrade\-to=<url>] [\-verbose] [\-version]
@@ -63,7 +64,8 @@ Write events to timestamped file \fBaudit\-YYYYMMDD\-HHMMSS.log\fP\&.
 .INDENT 0.0
 .TP
 .B \-auditfile=<file|\-|\-\->
-Use specified file or stream (\fB"\-"\fP for stdout, \fB"\-\-"\fP for stderr) for audit events, rather than the timestamped default file name.
+Use specified file or stream (\fB"\-"\fP for stdout, \fB"\-\-"\fP for stderr) for
+audit events, rather than the timestamped default file name.
 .UNINDENT
 .INDENT 0.0
 .TP
@@ -89,13 +91,28 @@ or file path (\fB/var/run/st.sock\fP, for UNIX sockets).
 .INDENT 0.0
 .TP
 .B \-home=<dir>
-Set configuration directory. The default configuration directory is
-\fB$HOME/.config/syncthing\fP (Unix\-like), \fB$HOME/Library/Application Support/Syncthing\fP (Mac) and \fB%LOCALAPPDATA%\eSyncthing\fP (Windows).
+Set common configuration and data directory. The default configuration
+directory is \fB$HOME/.config/syncthing\fP (Unix\-like),
+\fB$HOME/Library/Application Support/Syncthing\fP (Mac) and
+\fB%LOCALAPPDATA%\eSyncthing\fP (Windows).
+.UNINDENT
+.INDENT 0.0
+.TP
+.B \-config=<dir>
+Set configuration directory. Alternative to \fB\-home\fP and must be used
+together with \fB\-data\fP\&.
+.UNINDENT
+.INDENT 0.0
+.TP
+.B \-data=<dir>
+Set data (e.g. database) directory. Alternative to \fB\-home\fP and must be used
+together with \fB\-config\fP\&.
 .UNINDENT
 .INDENT 0.0
 .TP
 .B \-logfile=<filename>
-Set destination filename for logging (use \fB"\-"\fP for stdout, which is the default option).
+Set destination filename for logging (use \fB"\-"\fP for stdout, which is the
+default option).
 .UNINDENT
 .INDENT 0.0
 .TP
@@ -132,12 +149,14 @@ Hide the console window. (On Windows only)
 .INDENT 0.0
 .TP
 .B \-no\-restart
-Disable the Syncthing monitor process which handles restarts for some configuration changes, upgrades, crashes and also log file writing (stdout is still written).
+Do not restart Syncthing when it exits. The monitor process will still run
+to handle crashes and writing to logfiles (if configured to).
 .UNINDENT
 .INDENT 0.0
 .TP
 .B \-paths
-Print the paths used for configuration, keys, database, GUI overrides, default sync folder and the log file.
+Print the paths used for configuration, keys, database, GUI overrides,
+default sync folder and the log file.
 .UNINDENT
 .INDENT 0.0
 .TP
@@ -207,11 +226,9 @@ Restarting
 Upgrading
 .UNINDENT
 .sp
-Some of these exit codes are only returned when running without a monitor
-process (with environment variable \fBSTNORESTART\fP set). Exit codes over 125 are
-usually returned by the shell/binary loader/default signal handler. Exit codes
-over 128+N on Unix usually represent the signal which caused the process to
-exit. For example, \fB128 + 9 (SIGKILL) = 137\fP\&.
+Exit codes over 125 are usually returned by the shell/binary loader/default
+signal handler. Exit codes over 128+N on Unix usually represent the signal which
+caused the process to exit. For example, \fB128 + 9 (SIGKILL) = 137\fP\&.
 .SH PROXIES
 .sp
 Syncthing can use a SOCKS, HTTP, or HTTPS proxy to talk to the outside
@@ -366,9 +383,7 @@ Don’t create a default folder when starting for the first time. This
 variable will be ignored anytime after the first run.
 .TP
 .B STNORESTART
-Equivalent to the \fB\-no\-restart\fP flag. Disable the Syncthing monitor
-process which handles restarts for some configuration changes, upgrades,
-crashes and also log file writing (stdout is still written).
+Equivalent to the \fB\-no\-restart\fP flag
 .TP
 .B STNOUPGRADE
 Disable automatic upgrades.

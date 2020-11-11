@@ -135,7 +135,7 @@ func (m *mockedModel) IndexUpdate(deviceID protocol.DeviceID, folder string, fil
 	return nil
 }
 
-func (m *mockedModel) Request(deviceID protocol.DeviceID, folder, name string, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (protocol.RequestResponse, error) {
+func (m *mockedModel) Request(deviceID protocol.DeviceID, folder, name string, blockNo, size int32, offset int64, hash []byte, weakHash uint32, fromTemporary bool) (protocol.RequestResponse, error) {
 	return nil, nil
 }
 
@@ -149,9 +149,9 @@ func (m *mockedModel) DownloadProgress(deviceID protocol.DeviceID, folder string
 	return nil
 }
 
-func (m *mockedModel) AddConnection(conn connections.Connection, hello protocol.HelloResult) {}
+func (m *mockedModel) AddConnection(conn connections.Connection, hello protocol.Hello) {}
 
-func (m *mockedModel) OnHello(protocol.DeviceID, net.Addr, protocol.HelloResult) error {
+func (m *mockedModel) OnHello(protocol.DeviceID, net.Addr, protocol.Hello) error {
 	return nil
 }
 
