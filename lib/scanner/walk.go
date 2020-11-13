@@ -73,7 +73,15 @@ type ScanResult struct {
 }
 
 func Walk(ctx context.Context, cfg Config) chan ScanResult {
-	w := walker{cfg}
+	return newWalker(cfg).walk(ctx)
+}
+
+func WalkWithoutHashing(ctx context.Context, cfg Config) chan ScanResult {
+	return newWalker(cfg).walkWithoutHashing(ctx)
+}
+
+func newWalker(cfg Config) *walker {
+	w := &walker{cfg}
 
 	if w.CurrentFiler == nil {
 		w.CurrentFiler = noCurrentFiler{}
@@ -85,7 +93,7 @@ func Walk(ctx context.Context, cfg Config) chan ScanResult {
 		w.Matcher = ignore.New(w.Filesystem)
 	}
 
-	return w.walk(ctx)
+	return w
 }
 
 var (
@@ -108,21 +116,7 @@ func (w *walker) walk(ctx context.Context) chan ScanResult {
 
 	// A routine which walks the filesystem tree, and sends files which have
 	// been modified to the counter routine.
-	go func() {
-		hashFiles := w.walkAndHashFiles(ctx, toHashChan, finishedChan)
-		if len(w.Subs) == 0 {
-			w.Filesystem.Walk(".", hashFiles)
-		} else {
-			for _, sub := range w.Subs {
-				if err := osutil.TraversesSymlink(w.Filesystem, filepath.Dir(sub)); err != nil {
-					l.Debugf("Skip walking %v as it is below a symlink", sub)
-					continue
-				}
-				w.Filesystem.Walk(sub, hashFiles)
-			}
-		}
-		close(toHashChan)
-	}()
+	go w.scan(ctx, toHashChan, finishedChan)
 
 	// We're not required to emit scan progress events, just kick off hashers,
 	// and feed inputs directly from the walker.
@@ -201,6 +195,42 @@ func (w *walker) walk(ctx context.Context) chan ScanResult {
 	}()
 
 	return finishedChan
+}
+
+func (w *walker) walkWithoutHashing(ctx context.Context) chan ScanResult {
+	l.Debugln("Walk without hashing", w.Subs, w.Matcher)
+
+	toHashChan := make(chan protocol.FileInfo)
+	finishedChan := make(chan ScanResult)
+
+	// A routine which walks the filesystem tree, and sends files which have
+	// been modified to the counter routine.
+	go w.scan(ctx, toHashChan, finishedChan)
+
+	go func() {
+		for file := range toHashChan {
+			finishedChan <- ScanResult{File: file}
+		}
+		close(finishedChan)
+	}()
+
+	return finishedChan
+}
+
+func (w *walker) scan(ctx context.Context, toHashChan chan<- protocol.FileInfo, finishedChan chan<- ScanResult) {
+	hashFiles := w.walkAndHashFiles(ctx, toHashChan, finishedChan)
+	if len(w.Subs) == 0 {
+		w.Filesystem.Walk(".", hashFiles)
+	} else {
+		for _, sub := range w.Subs {
+			if err := osutil.TraversesSymlink(w.Filesystem, filepath.Dir(sub)); err != nil {
+				l.Debugf("Skip walking %v as it is below a symlink", sub)
+				continue
+			}
+			w.Filesystem.Walk(sub, hashFiles)
+		}
+	}
+	close(toHashChan)
 }
 
 func (w *walker) walkAndHashFiles(ctx context.Context, toHashChan chan<- protocol.FileInfo, finishedChan chan<- ScanResult) fs.WalkFunc {
@@ -350,7 +380,7 @@ func (w *walker) walkRegular(ctx context.Context, relPath string, info fs.FileIn
 	f, _ := CreateFileInfo(info, relPath, nil)
 	f = w.updateFileInfo(f, curFile)
 	f.NoPermissions = w.IgnorePerms
-	f.RawBlockSize = int32(blockSize)
+	f.RawBlockSize = blockSize
 
 	if hasCurFile {
 		if curFile.IsEquivalentOptional(f, w.ModTimeWindow, w.IgnorePerms, true, w.LocalFlags) {
@@ -611,7 +641,7 @@ func CreateFileInfo(fi fs.FileInfo, name string, filesystem fs.Filesystem) (prot
 	}
 	f.Permissions = uint32(fi.Mode() & fs.ModePerm)
 	f.ModifiedS = fi.ModTime().Unix()
-	f.ModifiedNs = int32(fi.ModTime().Nanosecond())
+	f.ModifiedNs = fi.ModTime().Nanosecond()
 	if fi.IsDir() {
 		f.Type = protocol.FileInfoTypeDirectory
 		return f, nil

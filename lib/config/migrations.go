@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/upgrade"
@@ -24,29 +25,33 @@ import (
 // config version. The conversion function can be nil in which case we just
 // update the config version. The order of migrations doesn't matter here,
 // put the newest on top for readability.
-var migrations = migrationSet{
-	{31, migrateToConfigV31},
-	{30, migrateToConfigV30},
-	{29, migrateToConfigV29},
-	{28, migrateToConfigV28},
-	{27, migrateToConfigV27},
-	{26, nil}, // triggers database update
-	{25, migrateToConfigV25},
-	{24, migrateToConfigV24},
-	{23, migrateToConfigV23},
-	{22, migrateToConfigV22},
-	{21, migrateToConfigV21},
-	{20, migrateToConfigV20},
-	{19, nil}, // Triggers a database tweak
-	{18, migrateToConfigV18},
-	{17, nil}, // Fsync = true removed
-	{16, nil}, // Triggers a database tweak
-	{15, migrateToConfigV15},
-	{14, migrateToConfigV14},
-	{13, migrateToConfigV13},
-	{12, migrateToConfigV12},
-	{11, migrateToConfigV11},
-}
+var (
+	migrations = migrationSet{
+		{32, migrateToConfigV32},
+		{31, migrateToConfigV31},
+		{30, migrateToConfigV30},
+		{29, migrateToConfigV29},
+		{28, migrateToConfigV28},
+		{27, migrateToConfigV27},
+		{26, nil}, // triggers database update
+		{25, migrateToConfigV25},
+		{24, migrateToConfigV24},
+		{23, migrateToConfigV23},
+		{22, migrateToConfigV22},
+		{21, migrateToConfigV21},
+		{20, migrateToConfigV20},
+		{19, nil}, // Triggers a database tweak
+		{18, migrateToConfigV18},
+		{17, nil}, // Fsync = true removed
+		{16, nil}, // Triggers a database tweak
+		{15, migrateToConfigV15},
+		{14, migrateToConfigV14},
+		{13, migrateToConfigV13},
+		{12, migrateToConfigV12},
+		{11, migrateToConfigV11},
+	}
+	migrationsMut = sync.Mutex{}
+)
 
 type migrationSet []migration
 
@@ -89,6 +94,12 @@ func (m migration) apply(cfg *Configuration) {
 func migrateToConfigV31(cfg *Configuration) {
 	// Show a notification about setting User and Password
 	cfg.Options.UnackedNotificationIDs = append(cfg.Options.UnackedNotificationIDs, "authenticationUserAndPassword")
+}
+
+func migrateToConfigV32(cfg *Configuration) {
+	for i := range cfg.Folders {
+		cfg.Folders[i].JunctionsAsDirs = true
+	}
 }
 
 func migrateToConfigV30(cfg *Configuration) {
@@ -215,7 +226,7 @@ func migrateToConfigV18(cfg *Configuration) {
 	// Do channel selection for existing users. Those who have auto upgrades
 	// and usage reporting on default to the candidate channel. Others get
 	// stable.
-	if cfg.Options.URAccepted > 0 && cfg.Options.AutoUpgradeIntervalH > 0 {
+	if cfg.Options.URAccepted > 0 && cfg.Options.AutoUpgradeEnabled() {
 		cfg.Options.UpgradeToPreReleases = true
 	}
 

@@ -160,7 +160,7 @@ func (t *quicListener) URI() *url.URL {
 }
 
 func (t *quicListener) WANAddresses() []*url.URL {
-	uris := t.LANAddresses()
+	uris := []*url.URL{t.uri}
 	t.mut.Lock()
 	if t.address != nil {
 		uris = append(uris, t.address)
@@ -170,7 +170,10 @@ func (t *quicListener) WANAddresses() []*url.URL {
 }
 
 func (t *quicListener) LANAddresses() []*url.URL {
-	return []*url.URL{t.uri}
+	addrs := []*url.URL{t.uri}
+	network := strings.Replace(t.uri.Scheme, "quic", "udp", -1)
+	addrs = append(addrs, getURLsForAllAdaptersIfUnspecified(network, t.uri)...)
+	return addrs
 }
 
 func (t *quicListener) String() string {

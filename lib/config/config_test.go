@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/d4l3k/messagediff"
+
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -75,6 +76,8 @@ func TestDefaultValues(t *testing.T) {
 		StunKeepaliveStartS:     180,
 		StunKeepaliveMinS:       20,
 		RawStunServers:          []string{"default"},
+		AnnounceLANAddresses:    true,
+		FeatureFlags:            []string{},
 	}
 
 	cfg := New(device1)
@@ -126,6 +129,8 @@ func TestDeviceConfig(t *testing.T) {
 				},
 				WeakHashThresholdPct: 25,
 				MarkerName:           DefaultMarkerName,
+				JunctionsAsDirs:      true,
+				MaxConcurrentWrites:  maxConcurrentWritesDefault,
 			},
 		}
 
@@ -134,7 +139,7 @@ func TestDeviceConfig(t *testing.T) {
 				DeviceID:        device1,
 				Name:            "node one",
 				Addresses:       []string{"tcp://a"},
-				Compression:     protocol.CompressMetadata,
+				Compression:     protocol.CompressionMetadata,
 				AllowedNetworks: []string{},
 				IgnoredFolders:  []ObservedFolder{},
 				PendingFolders:  []ObservedFolder{},
@@ -143,7 +148,7 @@ func TestDeviceConfig(t *testing.T) {
 				DeviceID:        device4,
 				Name:            "node two",
 				Addresses:       []string{"tcp://b"},
-				Compression:     protocol.CompressMetadata,
+				Compression:     protocol.CompressionMetadata,
 				AllowedNetworks: []string{},
 				IgnoredFolders:  []ObservedFolder{},
 				PendingFolders:  []ObservedFolder{},
@@ -221,6 +226,7 @@ func TestOverriddenValues(t *testing.T) {
 		StunKeepaliveStartS:     9000,
 		StunKeepaliveMinS:       900,
 		RawStunServers:          []string{"foo"},
+		FeatureFlags:            []string{"feature"},
 	}
 
 	os.Unsetenv("STNOUPGRADE")
@@ -262,7 +268,7 @@ func TestDeviceAddressesDynamic(t *testing.T) {
 			DeviceID:        device4,
 			Name:            name, // Set when auto created
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressMetadata,
+			Compression:     protocol.CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
 			PendingFolders:  []ObservedFolder{},
@@ -286,7 +292,7 @@ func TestDeviceCompression(t *testing.T) {
 		device1: {
 			DeviceID:        device1,
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressMetadata,
+			Compression:     protocol.CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
 			PendingFolders:  []ObservedFolder{},
@@ -294,7 +300,7 @@ func TestDeviceCompression(t *testing.T) {
 		device2: {
 			DeviceID:        device2,
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressMetadata,
+			Compression:     protocol.CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
 			PendingFolders:  []ObservedFolder{},
@@ -302,7 +308,7 @@ func TestDeviceCompression(t *testing.T) {
 		device3: {
 			DeviceID:        device3,
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressNever,
+			Compression:     protocol.CompressionNever,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
 			PendingFolders:  []ObservedFolder{},
@@ -311,7 +317,7 @@ func TestDeviceCompression(t *testing.T) {
 			DeviceID:        device4,
 			Name:            name, // Set when auto created
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressMetadata,
+			Compression:     protocol.CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
 			PendingFolders:  []ObservedFolder{},
@@ -357,7 +363,7 @@ func TestDeviceAddressesStatic(t *testing.T) {
 			DeviceID:        device4,
 			Name:            name, // Set when auto created
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressMetadata,
+			Compression:     protocol.CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
 			PendingFolders:  []ObservedFolder{},
@@ -522,9 +528,6 @@ func TestNewSaveLoad(t *testing.T) {
 	intCfg := New(device1)
 	cfg := wrap(path, intCfg)
 
-	// To make the equality pass later
-	cfg.(*wrapper).cfg.XMLName.Local = "configuration"
-
 	if exists(path) {
 		t.Error(path, "exists")
 	}
@@ -613,14 +616,14 @@ func TestPullOrder(t *testing.T) {
 		name  string
 		order PullOrder
 	}{
-		{"f1", OrderRandom},        // empty value, default
-		{"f2", OrderRandom},        // explicit
-		{"f3", OrderAlphabetic},    // explicit
-		{"f4", OrderRandom},        // unknown value, default
-		{"f5", OrderSmallestFirst}, // explicit
-		{"f6", OrderLargestFirst},  // explicit
-		{"f7", OrderOldestFirst},   // explicit
-		{"f8", OrderNewestFirst},   // explicit
+		{"f1", PullOrderRandom},        // empty value, default
+		{"f2", PullOrderRandom},        // explicit
+		{"f3", PullOrderAlphabetic},    // explicit
+		{"f4", PullOrderRandom},        // unknown value, default
+		{"f5", PullOrderSmallestFirst}, // explicit
+		{"f6", PullOrderLargestFirst},  // explicit
+		{"f7", PullOrderOldestFirst},   // explicit
+		{"f8", PullOrderNewestFirst},   // explicit
 	}
 
 	// Verify values are deserialized correctly
@@ -639,7 +642,7 @@ func TestPullOrder(t *testing.T) {
 
 	t.Logf("%s", buf.Bytes())
 
-	cfg, err = ReadXML(buf, device1)
+	cfg, _, err = ReadXML(buf, device1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1168,7 +1171,8 @@ func defaultConfigAsMap() map[string]interface{} {
 }
 
 func load(path string, myID protocol.DeviceID) (Wrapper, error) {
-	return Load(path, myID, events.NoopLogger)
+	cfg, _, err := Load(path, myID, events.NoopLogger)
+	return cfg, err
 }
 
 func wrap(path string, cfg Configuration) Wrapper {

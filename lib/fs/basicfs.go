@@ -19,17 +19,31 @@ import (
 )
 
 var (
-	ErrInvalidFilename = errors.New("filename is invalid")
-	ErrNotRelative     = errors.New("not a relative path")
+	errInvalidFilenameEmpty               = errors.New("name is invalid, must not be empty")
+	errInvalidFilenameWindowsSpacePeriod  = errors.New("name is invalid, must not end in space or period on Windows")
+	errInvalidFilenameWindowsReservedName = errors.New("name is invalid, contains Windows reserved name (NUL, COM1, etc.)")
+	errInvalidFilenameWindowsReservedChar = errors.New("name is invalid, contains Windows reserved character (?, *, etc.)")
+	errNotRelative                        = errors.New("not a relative path")
 )
+
+func WithJunctionsAsDirs() Option {
+	return func(fs Filesystem) {
+		if basic, ok := fs.(*BasicFilesystem); !ok {
+			l.Warnln("WithJunctionsAsDirs must only be used with FilesystemTypeBasic")
+		} else {
+			basic.junctionsAsDirs = true
+		}
+	}
+}
 
 // The BasicFilesystem implements all aspects by delegating to package os.
 // All paths are relative to the root and cannot (should not) escape the root directory.
 type BasicFilesystem struct {
-	root string
+	root            string
+	junctionsAsDirs bool
 }
 
-func newBasicFilesystem(root string) *BasicFilesystem {
+func newBasicFilesystem(root string, opts ...Option) *BasicFilesystem {
 	if root == "" {
 		root = "." // Otherwise "" becomes "/" below
 	}
@@ -64,7 +78,13 @@ func newBasicFilesystem(root string) *BasicFilesystem {
 		root = longFilenameSupport(root)
 	}
 
-	return &BasicFilesystem{root}
+	fs := &BasicFilesystem{
+		root: root,
+	}
+	for _, opt := range opts {
+		opt(fs)
+	}
+	return fs
 }
 
 // rooted expands the relative path to the full path that is then used with os
@@ -78,7 +98,7 @@ func (f *BasicFilesystem) rooted(rel string) (string, error) {
 func rooted(rel, root string) (string, error) {
 	// The root must not be empty.
 	if root == "" {
-		return "", ErrInvalidFilename
+		return "", errInvalidFilenameEmpty
 	}
 
 	var err error
@@ -145,7 +165,7 @@ func (f *BasicFilesystem) Lstat(name string) (FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	fi, err := underlyingLstat(name)
+	fi, err := f.underlyingLstat(name)
 	if err != nil {
 		return nil, err
 	}
@@ -275,8 +295,8 @@ func (f *BasicFilesystem) Usage(name string) (Usage, error) {
 		return Usage{}, err
 	}
 	return Usage{
-		Free:  int64(u.Free),
-		Total: int64(u.Total),
+		Free:  u.Free,
+		Total: u.Total,
 	}, nil
 }
 

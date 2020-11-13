@@ -7,6 +7,7 @@
 package backend
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -108,6 +109,8 @@ type Iterator interface {
 // consider always using a transaction of the appropriate type. The
 // transaction isolation level is "read committed" - there are no dirty
 // reads.
+// Location returns the path to the database, as given to Open. The returned string
+// is empty for a db in memory.
 type Backend interface {
 	Reader
 	Writer
@@ -115,6 +118,7 @@ type Backend interface {
 	NewWriteTransaction(hooks ...CommitHook) (WriteTransaction, error)
 	Close() error
 	Compact() error
+	Location() string
 }
 
 type Tuning int
@@ -127,24 +131,14 @@ const (
 )
 
 func Open(path string, tuning Tuning) (Backend, error) {
-	if os.Getenv("USE_BADGER") != "" {
-		l.Warnln("Using experimental badger db")
-		if err := maybeCopyDatabase(path, strings.Replace(path, locations.BadgerDir, locations.LevelDBDir, 1), OpenBadger, OpenLevelDBRO); err != nil {
-			return nil, err
-		}
-		return OpenBadger(path)
-	}
-
 	if err := maybeCopyDatabase(path, strings.Replace(path, locations.LevelDBDir, locations.BadgerDir, 1), OpenLevelDBAuto, OpenBadger); err != nil {
 		return nil, err
 	}
+
 	return OpenLevelDB(path, tuning)
 }
 
 func OpenMemory() Backend {
-	if os.Getenv("USE_BADGER") != "" {
-		return OpenBadgerMemory()
-	}
 	return OpenLevelDBMemory()
 }
 
@@ -157,13 +151,13 @@ type errNotFound struct{}
 func (*errNotFound) Error() string { return "key not found" }
 
 func IsClosed(err error) bool {
-	_, ok := err.(*errClosed)
-	return ok
+	var e *errClosed
+	return errors.As(err, &e)
 }
 
 func IsNotFound(err error) bool {
-	_, ok := err.(*errNotFound)
-	return ok
+	var e *errNotFound
+	return errors.As(err, &e)
 }
 
 // releaser manages counting on top of a waitgroup
