@@ -115,12 +115,12 @@ func createTmpWrapper(cfg config.Configuration) config.Wrapper {
 	if err != nil {
 		panic(err)
 	}
-	wrapper := config.Wrap(tmpFile.Name(), cfg, events.NoopLogger)
+	wrapper := config.Wrap(tmpFile.Name(), cfg, myID, events.NoopLogger)
 	tmpFile.Close()
 	return wrapper
 }
 
-func newState(cfg config.Configuration) *model {
+func newState(cfg config.Configuration) *testModel {
 	wcfg := createTmpWrapper(cfg)
 
 	m := setupModel(wcfg)
@@ -331,7 +331,7 @@ func TestDeviceRename(t *testing.T) {
 			DeviceID: device1,
 		},
 	}
-	cfg := config.Wrap("testdata/tmpconfig.xml", rawCfg, events.NoopLogger)
+	cfg := config.Wrap("testdata/tmpconfig.xml", rawCfg, device1, events.NoopLogger)
 
 	db := db.NewLowlevel(backend.OpenMemory())
 	m := newModel(cfg, myID, "syncthing", "dev", db, nil)
@@ -1396,7 +1396,7 @@ func TestAutoAcceptEnc(t *testing.T) {
 	}
 }
 
-func changeIgnores(t *testing.T, m *model, expected []string) {
+func changeIgnores(t *testing.T, m *testModel, expected []string) {
 	arrEqual := func(a, b []string) bool {
 		if len(a) != len(b) {
 			return false
@@ -4205,7 +4205,7 @@ func TestNeedMetaAfterIndexReset(t *testing.T) {
 func TestCcCheckEncryption(t *testing.T) {
 	w, fcfg := tmpDefaultWrapper()
 	m := setupModel(w)
-	m.Stop()
+	m.cancel()
 	defer cleanupModel(m)
 
 	pw := "foo"
@@ -4338,6 +4338,34 @@ func TestCcCheckEncryption(t *testing.T) {
 		if err != errEncryptionPassword {
 			t.Errorf("Testcase %v: Expected error %v, got %v", i, errEncryptionPassword, err)
 		}
+	}
+}
+
+func TestCCFolderNotRunning(t *testing.T) {
+	// Create the folder, but don't start it.
+	w, fcfg := tmpDefaultWrapper()
+	tfs := fcfg.Filesystem()
+	m := newModel(w, myID, "syncthing", "dev", db.NewLowlevel(backend.OpenMemory()), nil)
+	defer cleanupModelAndRemoveDir(m, tfs.URI())
+
+	// A connection can happen before all the folders are started.
+	cc := m.generateClusterConfig(device1)
+	if l := len(cc.Folders); l != 1 {
+		t.Fatalf("Expected 1 folder in CC, got %v", l)
+	}
+	folder := cc.Folders[0]
+	if id := folder.ID; id != fcfg.ID {
+		t.Fatalf("Expected folder %v, got %v", fcfg.ID, id)
+	}
+	if l := len(folder.Devices); l != 2 {
+		t.Fatalf("Expected 2 devices in CC, got %v", l)
+	}
+	local := folder.Devices[1]
+	if local.ID != myID {
+		local = folder.Devices[0]
+	}
+	if !folder.Paused && local.IndexID == 0 {
+		t.Errorf("Folder isn't paused, but index-id is zero")
 	}
 }
 
