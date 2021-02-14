@@ -11,7 +11,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -73,7 +75,7 @@ func (e encryptedModel) Request(deviceID DeviceID, folder, name string, blockNo,
 
 	realName, err := decryptName(name, folderKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decrypting name: %w", err)
 	}
 	realSize := size - blockOverhead
 	realOffset := offset - int64(blockNo*blockOverhead)
@@ -82,10 +84,23 @@ func (e encryptedModel) Request(deviceID DeviceID, folder, name string, blockNo,
 		return nil, errors.New("short request")
 	}
 
-	// Perform that request and grab the data. Explicitly zero out the
-	// hashes which are meaningless.
+	// Decrypt the block hash.
 
-	resp, err := e.model.Request(deviceID, folder, realName, blockNo, realSize, realOffset, nil, 0, false)
+	fileKey := FileKey(realName, folderKey)
+	var additional [8]byte
+	binary.BigEndian.PutUint64(additional[:], uint64(realOffset))
+	realHash, err := decryptDeterministic(hash, fileKey, additional[:])
+	if err != nil {
+		// "Legacy", no offset additional data?
+		realHash, err = decryptDeterministic(hash, fileKey, nil)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("decrypting block hash: %w", err)
+	}
+
+	// Perform that request and grab the data.
+
+	resp, err := e.model.Request(deviceID, folder, realName, blockNo, realSize, realOffset, realHash, 0, false)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +117,6 @@ func (e encryptedModel) Request(deviceID DeviceID, folder, name string, blockNo,
 		}
 		data = nd
 	}
-	fileKey := FileKey(realName, folderKey)
 	enc := encryptBytes(data, fileKey)
 	resp.Close()
 	return rawResponse{enc}, nil
@@ -128,6 +142,7 @@ func (e encryptedModel) Closed(conn Connection, err error) {
 // The encryptedConnection sits between the model and the encrypted device. It
 // encrypts outgoing metadata and decrypts incoming responses.
 type encryptedConnection struct {
+	ConnectionInfo
 	conn       Connection
 	folderKeys map[string]*[keySize]byte // folder ID -> key
 }
@@ -138,10 +153,6 @@ func (e encryptedConnection) Start() {
 
 func (e encryptedConnection) ID() DeviceID {
 	return e.conn.ID()
-}
-
-func (e encryptedConnection) Name() string {
-	return e.conn.Name()
 }
 
 func (e encryptedConnection) Index(ctx context.Context, folder string, files []FileInfo) error {
@@ -269,10 +280,19 @@ func encryptFileInfo(fi FileInfo, folderKey *[keySize]byte) FileInfo {
 			b.Size = minPaddedSize
 		}
 		size := b.Size + blockOverhead
+
+		// The offset goes into the encrypted block hash as additional data,
+		// essentially mixing in with the nonce. This means a block hash
+		// remains stable for the same data at the same offset, but doesn't
+		// reveal the existence of identical data blocks at other offsets.
+		var additional [8]byte
+		binary.BigEndian.PutUint64(additional[:], uint64(b.Offset))
+		hash := encryptDeterministic(b.Hash, fileKey, additional[:])
+
 		blocks[i] = BlockInfo{
+			Hash:   hash,
 			Offset: offset,
 			Size:   size,
-			Hash:   encryptDeterministic(b.Hash, fileKey),
 		}
 		offset += int64(size)
 	}
@@ -340,7 +360,7 @@ func DecryptFileInfo(fi FileInfo, folderKey *[keySize]byte) (FileInfo, error) {
 // result is always the same for any given string) and encodes it in a
 // filesystem-friendly manner.
 func encryptName(name string, key *[keySize]byte) string {
-	enc := encryptDeterministic([]byte(name), key)
+	enc := encryptDeterministic([]byte(name), key, nil)
 	b32enc := base32.HexEncoding.WithPadding(base32.NoPadding).EncodeToString(enc)
 	return slashify(b32enc)
 }
@@ -352,7 +372,7 @@ func decryptName(name string, key *[keySize]byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dec, err := decryptDeterministic(bs, key)
+	dec, err := decryptDeterministic(bs, key, nil)
 	if err != nil {
 		return "", err
 	}
@@ -367,21 +387,21 @@ func encryptBytes(data []byte, key *[keySize]byte) []byte {
 }
 
 // encryptDeterministic encrypts bytes using AES-SIV
-func encryptDeterministic(data []byte, key *[keySize]byte) []byte {
+func encryptDeterministic(data []byte, key *[keySize]byte, additionalData []byte) []byte {
 	aead, err := miscreant.NewAEAD(miscreantAlgo, key[:], 0)
 	if err != nil {
 		panic("cipher failure: " + err.Error())
 	}
-	return aead.Seal(nil, nil, data, nil)
+	return aead.Seal(nil, nil, data, additionalData)
 }
 
 // decryptDeterministic decrypts bytes using AES-SIV
-func decryptDeterministic(data []byte, key *[keySize]byte) ([]byte, error) {
+func decryptDeterministic(data []byte, key *[keySize]byte, additionalData []byte) ([]byte, error) {
 	aead, err := miscreant.NewAEAD(miscreantAlgo, key[:], 0)
 	if err != nil {
 		panic("cipher failure: " + err.Error())
 	}
-	return aead.Open(nil, nil, data, nil)
+	return aead.Open(nil, nil, data, additionalData)
 }
 
 func encrypt(data []byte, nonce *[nonceSize]byte, key *[keySize]byte) []byte {
@@ -474,7 +494,7 @@ func FileKey(filename string, folderKey *[keySize]byte) *[keySize]byte {
 }
 
 func PasswordToken(folderID, password string) []byte {
-	return encryptDeterministic(knownBytes(folderID), KeyFromPassword(folderID, password))
+	return encryptDeterministic(knownBytes(folderID), KeyFromPassword(folderID, password), nil)
 }
 
 // slashify inserts slashes (and file extension) in the string to create an
@@ -538,10 +558,25 @@ func IsEncryptedParent(path string) bool {
 }
 
 func isEncryptedParentFromComponents(pathComponents []string) bool {
-	if l := len(pathComponents); l > 2 {
+	l := len(pathComponents)
+	if l == 2 && len(pathComponents[1]) != 2 {
 		return false
-	} else if l == 2 && len(pathComponents[1]) != 2 {
+	} else if l == 0 {
 		return false
 	}
-	return pathComponents[0][1:1+len(encryptedDirExtension)] == encryptedDirExtension
+	if len(pathComponents[0]) == 0 {
+		return false
+	}
+	if pathComponents[0][1:] != encryptedDirExtension {
+		return false
+	}
+	if l < 2 {
+		return true
+	}
+	for _, comp := range pathComponents[2:] {
+		if len(comp) != maxPathComponent {
+			return false
+		}
+	}
+	return true
 }

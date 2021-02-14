@@ -14,11 +14,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	lru "github.com/hashicorp/golang-lru"
 )
 
 const (
 	// How long to consider cached dirnames valid
-	caseCacheTimeout = time.Second
+	caseCacheTimeout   = time.Second
+	caseCacheItemLimit = 4 << 10
 )
 
 type ErrCaseConflict struct {
@@ -48,25 +51,35 @@ type fskey struct {
 // their cache every now and then.
 type caseFilesystemRegistry struct {
 	fss          map[fskey]*caseFilesystem
-	mut          sync.Mutex
+	mut          sync.RWMutex
 	startCleaner sync.Once
 }
 
-func (r *caseFilesystemRegistry) get(fs Filesystem) *caseFilesystem {
-	r.mut.Lock()
-	defer r.mut.Unlock()
-
+func (r *caseFilesystemRegistry) get(fs Filesystem) Filesystem {
 	k := fskey{fs.Type(), fs.URI()}
+
+	// Use double locking when getting a caseFs. In the common case it will
+	// already exist and we take the read lock fast path. If it doesn't, we
+	// take a write lock and try again.
+
+	r.mut.RLock()
 	caseFs, ok := r.fss[k]
+	r.mut.RUnlock()
+
 	if !ok {
-		caseFs = &caseFilesystem{
-			Filesystem: fs,
-			realCaser:  newDefaultRealCaser(fs),
+		r.mut.Lock()
+		caseFs, ok = r.fss[k]
+		if !ok {
+			caseFs = &caseFilesystem{
+				Filesystem: fs,
+				realCaser:  newDefaultRealCaser(fs),
+			}
+			r.fss[k] = caseFs
+			r.startCleaner.Do(func() {
+				go r.cleaner()
+			})
 		}
-		r.fss[k] = caseFs
-		r.startCleaner.Do(func() {
-			go r.cleaner()
-		})
+		r.mut.Unlock()
 	}
 
 	return caseFs
@@ -74,11 +87,23 @@ func (r *caseFilesystemRegistry) get(fs Filesystem) *caseFilesystem {
 
 func (r *caseFilesystemRegistry) cleaner() {
 	for range time.NewTicker(time.Minute).C {
-		r.mut.Lock()
+		// We need to not hold this lock for a long time, as it blocks
+		// creating new filesystems in get(), which is needed to do things
+		// like add new folders. The (*caseFs).dropCache() method can take
+		// an arbitrarily long time to kick in because it in turn waits for
+		// locks held by things performing I/O. So we can't call that from
+		// within the loop.
+
+		r.mut.RLock()
+		toProcess := make([]*caseFilesystem, 0, len(r.fss))
 		for _, caseFs := range r.fss {
+			toProcess = append(toProcess, caseFs)
+		}
+		r.mut.RUnlock()
+
+		for _, caseFs := range toProcess {
 			caseFs.dropCache()
 		}
-		r.mut.Unlock()
 	}
 }
 
@@ -98,7 +123,7 @@ type caseFilesystem struct {
 // case-sensitive one. However it will add some overhead and thus shouldn't be
 // used if the filesystem is known to already behave case-sensitively.
 func NewCaseFilesystem(fs Filesystem) Filesystem {
-	return globalCaseFilesystemRegistry.get(fs)
+	return wrapFilesystem(fs, globalCaseFilesystemRegistry.get)
 }
 
 func (f *caseFilesystem) Chmod(name string, mode FileMode) error {
@@ -329,96 +354,118 @@ func (f *caseFilesystem) checkCaseExisting(name string) error {
 }
 
 type defaultRealCaser struct {
-	fs   Filesystem
-	root *caseNode
-	mut  sync.RWMutex
+	fs    Filesystem
+	cache caseCache
 }
 
 func newDefaultRealCaser(fs Filesystem) *defaultRealCaser {
+	cache, err := lru.New2Q(caseCacheItemLimit)
+	// New2Q only errors if given invalid parameters, which we don't.
+	if err != nil {
+		panic(err)
+	}
 	caser := &defaultRealCaser{
-		fs:   fs,
-		root: &caseNode{name: "."},
+		fs: fs,
+		cache: caseCache{
+			TwoQueueCache: cache,
+		},
 	}
 	return caser
 }
 
 func (r *defaultRealCaser) realCase(name string) (string, error) {
-	out := "."
-	if name == out {
-		return out, nil
+	realName := "."
+	if name == realName {
+		return realName, nil
 	}
 
-	r.mut.Lock()
-	defer r.mut.Unlock()
-
-	node := r.root
 	for _, comp := range strings.Split(name, string(PathSeparator)) {
-		if node.dirNames == nil || node.expires.Before(time.Now()) {
-			// Haven't called DirNames yet, or the node has expired
+		node := r.cache.getExpireAdd(realName)
 
-			var err error
-			node.dirNames, err = r.fs.DirNames(out)
+		node.once.Do(func() {
+			dirNames, err := r.fs.DirNames(realName)
 			if err != nil {
-				return "", err
+				r.cache.Remove(realName)
+				node.err = err
+				return
 			}
 
-			node.dirNamesLower = make([]string, len(node.dirNames))
-			for i, n := range node.dirNames {
-				node.dirNamesLower[i] = UnicodeLowercase(n)
+			num := len(dirNames)
+			node.children = make(map[string]struct{}, num)
+			node.lowerToReal = make(map[string]string, num)
+			lastLower := ""
+			for _, n := range dirNames {
+				node.children[n] = struct{}{}
+				lower := UnicodeLowercase(n)
+				if lower != lastLower {
+					node.lowerToReal[lower] = n
+					lastLower = n
+				}
 			}
-
-			node.expires = time.Now().Add(caseCacheTimeout)
-			node.child = nil
+		})
+		if node.err != nil {
+			return "", node.err
 		}
 
-		// If we don't already have a correct cached child, try to find it.
-		if node.child == nil || node.child.name != comp {
-			// Actually loop dirNames to search for a match.
-			n, err := findCaseInsensitiveMatch(comp, node.dirNames, node.dirNamesLower)
-			if err != nil {
-				return "", err
+		// Try to find a direct or case match
+		if _, ok := node.children[comp]; !ok {
+			comp, ok = node.lowerToReal[UnicodeLowercase(comp)]
+			if !ok {
+				return "", ErrNotExist
 			}
-			node.child = &caseNode{name: n}
 		}
 
-		node = node.child
-		out = filepath.Join(out, node.name)
+		realName = filepath.Join(realName, comp)
 	}
 
-	return out, nil
+	return realName, nil
 }
 
 func (r *defaultRealCaser) dropCache() {
-	r.mut.Lock()
-	r.root = &caseNode{name: "."}
-	r.mut.Unlock()
+	r.cache.Purge()
 }
 
-// Both name and the key to children are "Real", case resolved names of the path
+func newCaseNode() *caseNode {
+	return &caseNode{
+		expires: time.Now().Add(caseCacheTimeout),
+	}
+}
+
+// The keys to children are "real", case resolved names of the path
 // component this node represents (i.e. containing no path separator).
-// The key to results is also a path component, but as given to RealCase, not
-// case resolved.
+// lowerToReal is a map of lowercase path components (as in UnicodeLowercase)
+// to their corresponding "real", case resolved names.
+// A node is created empty and populated using once. If an error occurs the node
+// is removed from cache and the error stored in err, such that anyone that
+// already got the node doesn't try to access the nil maps.
 type caseNode struct {
-	name          string
-	expires       time.Time
-	dirNames      []string
-	dirNamesLower []string
-	child         *caseNode
+	expires     time.Time
+	lowerToReal map[string]string
+	children    map[string]struct{}
+	once        sync.Once
+	err         error
 }
 
-func findCaseInsensitiveMatch(name string, names, namesLower []string) (string, error) {
-	lower := UnicodeLowercase(name)
-	candidate := ""
-	for i, n := range names {
-		if n == name {
-			return n, nil
-		}
-		if candidate == "" && namesLower[i] == lower {
-			candidate = n
-		}
+type caseCache struct {
+	*lru.TwoQueueCache
+	mut sync.Mutex
+}
+
+// getExpireAdd gets an entry for the given key. If no entry exists, or it is
+// expired a new one is created and added to the cache.
+func (c *caseCache) getExpireAdd(key string) *caseNode {
+	c.mut.Lock()
+	defer c.mut.Unlock()
+	v, ok := c.Get(key)
+	if !ok {
+		node := newCaseNode()
+		c.Add(key, node)
+		return node
 	}
-	if candidate == "" {
-		return "", ErrNotExist
+	node := v.(*caseNode)
+	if node.expires.Before(time.Now()) {
+		node = newCaseNode()
+		c.Add(key, node)
 	}
-	return candidate, nil
+	return node
 }

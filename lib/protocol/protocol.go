@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
 	"path"
 	"strings"
 	"sync"
@@ -134,7 +135,6 @@ type Connection interface {
 	Start()
 	Close(err error)
 	ID() DeviceID
-	Name() string
 	Index(ctx context.Context, folder string, files []FileInfo) error
 	IndexUpdate(ctx context.Context, folder string, files []FileInfo) error
 	Request(ctx context.Context, folder string, name string, blockNo int, offset int64, size int, hash []byte, weakHash uint32, fromTemporary bool) ([]byte, error)
@@ -142,16 +142,29 @@ type Connection interface {
 	DownloadProgress(ctx context.Context, folder string, updates []FileDownloadProgressUpdate)
 	Statistics() Statistics
 	Closed() bool
+	ConnectionInfo
+}
+
+type ConnectionInfo interface {
+	Type() string
+	Transport() string
+	RemoteAddr() net.Addr
+	Priority() int
+	String() string
+	Crypto() string
+	EstablishedAt() time.Time
 }
 
 type rawConnection struct {
+	ConnectionInfo
+
 	id        DeviceID
-	name      string
 	receiver  Model
 	startTime time.Time
 
-	cr *countingReader
-	cw *countingWriter
+	cr     *countingReader
+	cw     *countingWriter
+	closer io.Closer // Closing the underlying connection and thus cr and cw
 
 	awaiting    map[int]chan asyncResult
 	awaitingMut sync.Mutex
@@ -170,6 +183,8 @@ type rawConnection struct {
 	closeOnce             sync.Once
 	sendCloseOnce         sync.Once
 	compression           Compression
+
+	loopWG sync.WaitGroup // Need to ensure no leftover routines in testing
 }
 
 type asyncResult struct {
@@ -203,13 +218,13 @@ const (
 // Should not be modified in production code, just for testing.
 var CloseTimeout = 10 * time.Second
 
-func NewConnection(deviceID DeviceID, reader io.Reader, writer io.Writer, receiver Model, name string, compress Compression) Connection {
+func NewConnection(deviceID DeviceID, reader io.Reader, writer io.Writer, closer io.Closer, receiver Model, connInfo ConnectionInfo, compress Compression) Connection {
 	receiver = nativeModel{receiver}
-	rc := newRawConnection(deviceID, reader, writer, receiver, name, compress)
+	rc := newRawConnection(deviceID, reader, writer, closer, receiver, connInfo, compress)
 	return wireFormatConnection{rc}
 }
 
-func NewEncryptedConnection(passwords map[string]string, deviceID DeviceID, reader io.Reader, writer io.Writer, receiver Model, name string, compress Compression) Connection {
+func NewEncryptedConnection(passwords map[string]string, deviceID DeviceID, reader io.Reader, writer io.Writer, closer io.Closer, receiver Model, connInfo ConnectionInfo, compress Compression) Connection {
 	keys := keysFromPasswords(passwords)
 
 	// Encryption / decryption is first (outermost) before conversion to
@@ -219,23 +234,24 @@ func NewEncryptedConnection(passwords map[string]string, deviceID DeviceID, read
 
 	// We do the wire format conversion first (outermost) so that the
 	// metadata is in wire format when it reaches the encryption step.
-	rc := newRawConnection(deviceID, reader, writer, em, name, compress)
-	ec := encryptedConnection{conn: rc, folderKeys: keys}
+	rc := newRawConnection(deviceID, reader, writer, closer, em, connInfo, compress)
+	ec := encryptedConnection{ConnectionInfo: rc, conn: rc, folderKeys: keys}
 	wc := wireFormatConnection{ec}
 
 	return wc
 }
 
-func newRawConnection(deviceID DeviceID, reader io.Reader, writer io.Writer, receiver Model, name string, compress Compression) *rawConnection {
+func newRawConnection(deviceID DeviceID, reader io.Reader, writer io.Writer, closer io.Closer, receiver Model, connInfo ConnectionInfo, compress Compression) *rawConnection {
 	cr := &countingReader{Reader: reader}
 	cw := &countingWriter{Writer: writer}
 
 	return &rawConnection{
+		ConnectionInfo:        connInfo,
 		id:                    deviceID,
-		name:                  name,
 		receiver:              receiver,
 		cr:                    cr,
 		cw:                    cw,
+		closer:                closer,
 		awaiting:              make(map[int]chan asyncResult),
 		inbox:                 make(chan message),
 		outbox:                make(chan asyncMessage),
@@ -244,29 +260,40 @@ func newRawConnection(deviceID DeviceID, reader io.Reader, writer io.Writer, rec
 		dispatcherLoopStopped: make(chan struct{}),
 		closed:                make(chan struct{}),
 		compression:           compress,
+		loopWG:                sync.WaitGroup{},
 	}
 }
 
 // Start creates the goroutines for sending and receiving of messages. It must
 // be called exactly once after creating a connection.
 func (c *rawConnection) Start() {
-	go c.readerLoop()
+	c.loopWG.Add(5)
+	go func() {
+		c.readerLoop()
+		c.loopWG.Done()
+	}()
 	go func() {
 		err := c.dispatcherLoop()
-		c.internalClose(err)
+		c.Close(err)
+		c.loopWG.Done()
 	}()
-	go c.writerLoop()
-	go c.pingSender()
-	go c.pingReceiver()
+	go func() {
+		c.writerLoop()
+		c.loopWG.Done()
+	}()
+	go func() {
+		c.pingSender()
+		c.loopWG.Done()
+	}()
+	go func() {
+		c.pingReceiver()
+		c.loopWG.Done()
+	}()
 	c.startTime = time.Now()
 }
 
 func (c *rawConnection) ID() DeviceID {
 	return c.id
-}
-
-func (c *rawConnection) Name() string {
-	return c.name
 }
 
 // Index writes the list of file information to the connected peer device
@@ -410,7 +437,7 @@ func (c *rawConnection) dispatcherLoop() (err error) {
 				state = stateReady
 			}
 			if err := c.receiver.ClusterConfig(c.id, *msg); err != nil {
-				return errors.Wrap(err, "receiver error")
+				return fmt.Errorf("receiving cluster config: %w", err)
 			}
 
 		case *Index:
@@ -422,7 +449,7 @@ func (c *rawConnection) dispatcherLoop() (err error) {
 				return errors.Wrap(err, "protocol error: index")
 			}
 			if err := c.handleIndex(*msg); err != nil {
-				return errors.Wrap(err, "receiver error")
+				return fmt.Errorf("receiving index: %w", err)
 			}
 			state = stateReady
 
@@ -435,7 +462,7 @@ func (c *rawConnection) dispatcherLoop() (err error) {
 				return errors.Wrap(err, "protocol error: index update")
 			}
 			if err := c.handleIndexUpdate(*msg); err != nil {
-				return errors.Wrap(err, "receiver error")
+				return fmt.Errorf("receiving index update: %w", err)
 			}
 			state = stateReady
 
@@ -462,7 +489,7 @@ func (c *rawConnection) dispatcherLoop() (err error) {
 				return fmt.Errorf("protocol error: response message in state %d", state)
 			}
 			if err := c.receiver.DownloadProgress(c.id, msg.Folder, msg.Updates); err != nil {
-				return errors.Wrap(err, "receiver error")
+				return fmt.Errorf("receiving download progress: %w", err)
 			}
 
 		case *Ping:
@@ -474,7 +501,7 @@ func (c *rawConnection) dispatcherLoop() (err error) {
 
 		case *Close:
 			l.Debugln("read Close message")
-			return errors.New(msg.Reason)
+			return fmt.Errorf("closed by remote: %v", msg.Reason)
 
 		default:
 			l.Debugf("read unknown message: %+T", msg)
@@ -914,6 +941,9 @@ func (c *rawConnection) Close(err error) {
 func (c *rawConnection) internalClose(err error) {
 	c.closeOnce.Do(func() {
 		l.Debugln("close due to", err)
+		if cerr := c.closer.Close(); cerr != nil {
+			l.Debugln(c.id, "failed to close underlying conn:", cerr)
+		}
 		close(c.closed)
 
 		c.awaitingMut.Lock()

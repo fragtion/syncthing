@@ -32,10 +32,10 @@ import (
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/locations"
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/sync"
 	"github.com/syncthing/syncthing/lib/tlsutil"
 	"github.com/syncthing/syncthing/lib/ur"
-	"github.com/syncthing/syncthing/lib/util"
 	"github.com/thejerf/suture/v4"
 )
 
@@ -119,7 +119,7 @@ func TestStopAfterBrokenConfig(t *testing.T) {
 	defer os.Remove(token)
 	srv.started = make(chan string)
 
-	sup := suture.New("test", util.Spec())
+	sup := suture.New("test", svcutil.SpecWithDebugLogger(l))
 	sup.Add(srv)
 	ctx, cancel := context.WithCancel(context.Background())
 	sup.ServeBackground(ctx)
@@ -1253,6 +1253,11 @@ func TestConfigChanges(t *testing.T) {
 	defer os.Remove(tmpFile.Name())
 	w := config.Wrap(tmpFile.Name(), cfg, protocol.LocalDeviceID, events.NoopLogger)
 	tmpFile.Close()
+	if cfgService, ok := w.(suture.Service); ok {
+		cfgCtx, cfgCancel := context.WithCancel(context.Background())
+		go cfgService.Serve(cfgCtx)
+		defer cfgCancel()
+	}
 	baseURL, cancel, err := startHTTP(w)
 	if err != nil {
 		t.Fatal("Unexpected error from getting base URL:", err)
@@ -1260,7 +1265,7 @@ func TestConfigChanges(t *testing.T) {
 	defer cancel()
 
 	cli := &http.Client{
-		Timeout: time.Second,
+		Timeout: time.Minute,
 	}
 
 	do := func(req *http.Request, status int) *http.Response {

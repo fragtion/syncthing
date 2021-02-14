@@ -17,6 +17,7 @@ import (
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/dialer"
 	"github.com/syncthing/syncthing/lib/events"
+	"github.com/syncthing/syncthing/lib/svcutil"
 
 	"github.com/thejerf/suture/v4"
 )
@@ -28,6 +29,7 @@ var (
 	minDelay             = 10 * time.Second
 	maxDelay             = time.Minute
 	sendTimeout          = time.Minute
+	finalSendTimeout     = svcutil.ServiceTimeout / 2
 	evChanClosed         = "failure event channel closed"
 	invalidEventDataType = "failure event data is not a string"
 )
@@ -65,37 +67,17 @@ type failureStat struct {
 }
 
 func (h *failureHandler) Serve(ctx context.Context) error {
-	go func() {
-		select {
-		case h.optsChan <- h.cfg.Options():
-		case <-ctx.Done():
-		}
-	}()
-	h.cfg.Subscribe(h)
+	cfg := h.cfg.Subscribe(h)
 	defer h.cfg.Unsubscribe(h)
+	url, sub, evChan := h.applyOpts(cfg.Options, nil)
 
-	var url string
 	var err error
-	var sub events.Subscription
-	var evChan <-chan events.Event
 	timer := time.NewTimer(minDelay)
 	resetTimer := make(chan struct{})
-outer:
-	for {
+	for err == nil {
 		select {
 		case opts := <-h.optsChan:
-			// Sub nil checks just for safety - config updates can be racy.
-			if opts.URAccepted > 0 {
-				if sub == nil {
-					sub = h.evLogger.Subscribe(events.Failure)
-					evChan = sub.C()
-				}
-			} else if sub != nil {
-				sub.Unsubscribe()
-				sub = nil
-				evChan = nil
-			}
-			url = opts.CRURL + "/failure"
+			url, sub, evChan = h.applyOpts(opts, sub)
 		case e, ok := <-evChan:
 			if !ok {
 				// Just to be safe - shouldn't ever happen, as
@@ -116,11 +98,7 @@ outer:
 			now := time.Now()
 			for descr, stat := range h.buf {
 				if now.Sub(stat.last) > minDelay || now.Sub(stat.first) > maxDelay {
-					reports = append(reports, FailureReport{
-						Description: descr,
-						Count:       stat.count,
-						Version:     build.LongVersion,
-					})
+					reports = append(reports, newFailureReport(descr, stat.count))
 					delete(h.buf, descr)
 				}
 			}
@@ -133,18 +111,44 @@ outer:
 					case <-ctx.Done():
 					}
 				}()
+			} else {
+				timer.Reset(minDelay)
 			}
 		case <-resetTimer:
 			timer.Reset(minDelay)
 		case <-ctx.Done():
-			break outer
+			err = ctx.Err()
 		}
 	}
 
 	if sub != nil {
 		sub.Unsubscribe()
+		if len(h.buf) > 0 {
+			reports := make([]FailureReport, 0, len(h.buf))
+			for descr, stat := range h.buf {
+				reports = append(reports, newFailureReport(descr, stat.count))
+			}
+			timeout, cancel := context.WithTimeout(context.Background(), finalSendTimeout)
+			defer cancel()
+			sendFailureReports(timeout, reports, url)
+		}
 	}
 	return err
+}
+
+func (h *failureHandler) applyOpts(opts config.OptionsConfiguration, sub events.Subscription) (string, events.Subscription, <-chan events.Event) {
+	// Sub nil checks just for safety - config updates can be racy.
+	url := opts.CRURL + "/failure"
+	if opts.URAccepted > 0 {
+		if sub == nil {
+			sub = h.evLogger.Subscribe(events.Failure)
+		}
+		return url, sub, sub.C()
+	}
+	if sub != nil {
+		sub.Unsubscribe()
+	}
+	return url, nil, nil
 }
 
 func (h *failureHandler) addReport(descr string, evTime time.Time) {
@@ -190,7 +194,7 @@ func sendFailureReports(ctx context.Context, reports []FailureReport, url string
 
 	reqCtx, reqCancel := context.WithTimeout(ctx, sendTimeout)
 	defer reqCancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, &b)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, &b)
 	if err != nil {
 		l.Infoln("Failed to send failure report:", err)
 		return
@@ -204,4 +208,12 @@ func sendFailureReports(ctx context.Context, reports []FailureReport, url string
 	}
 	resp.Body.Close()
 	return
+}
+
+func newFailureReport(descr string, count int) FailureReport {
+	return FailureReport{
+		Description: descr,
+		Count:       count,
+		Version:     build.LongVersion,
+	}
 }

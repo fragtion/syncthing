@@ -47,7 +47,7 @@ func main() {
 	mux.Handle("/", cr)
 
 	if *dsn != "" {
-		mux.HandleFunc("/failure", handleFailureFn(*dsn))
+		mux.HandleFunc("/newcrash/failure", handleFailureFn(*dsn))
 	}
 
 	log.SetOutput(os.Stdout)
@@ -74,6 +74,7 @@ func handleFailureFn(dsn string) func(w http.ResponseWriter, req *http.Request) 
 		}
 		if len(reports) == 0 {
 			// Shouldn't happen
+			log.Printf("Got zero failure reports")
 			return
 		}
 
@@ -91,7 +92,9 @@ func handleFailureFn(dsn string) func(w http.ResponseWriter, req *http.Request) 
 			pkt.Fingerprint = []string{r.Description}
 
 			if err := sendReport(dsn, pkt, userIDFor(req)); err != nil {
-				log.Println("Failed to send  crash report:", err)
+				log.Println("Failed to send failure report:", err)
+			} else {
+				log.Println("Sent failure report:", r.Description)
 			}
 		}
 	}

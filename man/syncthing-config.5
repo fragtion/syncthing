@@ -1,6 +1,6 @@
 .\" Man page generated from reStructuredText.
 .
-.TH "SYNCTHING-CONFIG" "5" "Nov 02, 2020" "v1" "Syncthing"
+.TH "SYNCTHING-CONFIG" "5" "Feb 08, 2021" "v1" "Syncthing"
 .SH NAME
 syncthing-config \- Syncthing Configuration
 .
@@ -38,18 +38,23 @@ level margin: \\n[rst2man-indent\\n[rst2man-indent-level]]
 .ft C
 $HOME/.config/syncthing
 $HOME/Library/Application Support/Syncthing
-%LOCALAPPDATA%/Syncthing
+%LOCALAPPDATA%\eSyncthing
 .ft P
 .fi
 .UNINDENT
 .UNINDENT
 .SH DESCRIPTION
 .sp
-Syncthing uses a single directory to store configuration, crypto keys
-and index caches. The location defaults to \fB$HOME/.config/syncthing\fP
+New in version 1.5.0: Database and config can now be set separately. Previously the database was
+always located in the same directory as the config.
+
+.sp
+Syncthing uses a single directory to store configuration and crypto keys.
+Syncthing also has a database, which is often stored in this directory too.
+The config location defaults to \fB$HOME/.config/syncthing\fP
 (Unix\-like), \fB$HOME/Library/Application Support/Syncthing\fP (Mac),
-or \fB%LOCALAPPDATA%/Syncthing\fP (Windows). It can be changed at runtime
-using the \fB\-home\fP flag. In this directory the following files are
+or \fB%LOCALAPPDATA%\eSyncthing\fP (Windows). It can be changed at runtime
+using the \fB\-config\fP flag. In this directory the following files are
 located:
 .INDENT 0.0
 .TP
@@ -64,13 +69,34 @@ device ID. The key must be kept private.
 The certificate and key for HTTPS GUI connections. These may be replaced
 with a custom certificate for HTTPS as desired.
 .TP
-.B \fBindex\-\fP\fI*\fP\fB\&.db\fP
-A directory holding the database with metadata and hashes of the files
-currently on disk and available from peers.
-.TP
 .B \fBcsrftokens.txt\fP
 A list of recently issued CSRF tokens (for protection against browser cross
 site request forgery).
+.UNINDENT
+.sp
+The database is stored either in the same directory as the config (usually the
+default), but may also be located in one of the following directories (Unix\-like
+platforms only):
+.INDENT 0.0
+.IP \(bu 2
+If a database exists in the old default location, that location is
+still used.
+.IP \(bu 2
+If \fB$XDG_DATA_HOME\fP is set, use \fB$XDG_DATA_HOME/syncthing\fP\&.
+.IP \(bu 2
+If \fB~/.local/share/syncthing\fP exists, use that location.
+.IP \(bu 2
+Use the old default location (same as config).
+.UNINDENT
+.sp
+The location of the database can be changed using the \fB\-data\fP flag. The
+\fB\-home\fP flag sets both config and database locations at the same time.
+The database contains the following files:
+.INDENT 0.0
+.TP
+.B \fBindex\-\fP\fI*\fP\fB\&.db\fP
+A directory holding the database with metadata and hashes of the files
+currently on disk and available from peers.
 .UNINDENT
 .SH CONFIG FILE FORMAT
 .sp
@@ -113,6 +139,7 @@ The following shows an example of the default configuration file (IDs will diffe
         <maxSendKbps>0</maxSendKbps>
         <maxRecvKbps>0</maxRecvKbps>
         <maxRequestKiB>0</maxRequestKiB>
+        <remoteGUIPort>0</remoteGUIPort>
     </device>
     <gui enabled="true" tls="false" debugging="false">
         <address>127.0.0.1:8384</address>
@@ -414,9 +441,11 @@ On Unix systems, tries to copy file/folder ownership from the parent directory (
 Requires running Syncthing as privileged user, or granting it additional capabilities (e.g. CAP_CHOWN on Linux).
 .TP
 .B modTimeWindowS
-Allowed modification timestamp difference when comparing files for equivalence.
-To be used on systems that have unstable modification timestamps, that might change after being observed after
-the last write operation. Used in Android only.
+Allowed modification timestamp difference when comparing files for
+equivalence. To be used on file systems which have unstable
+modification timestamps that might change after being recorded
+during the last write operation. Defaults to 2 on Android when the
+folder is located on a FAT partition, and always to 0 elsewhere.
 .TP
 .B maxConcurrentWrites
 Maximum number of concurrent write operations while syncing. Defaults to 2. Increasing this might increase or
@@ -481,6 +510,7 @@ See folder\-copyRangeMethod for details.
     <maxSendKbps>0</maxSendKbps>
     <maxRecvKbps>0</maxRecvKbps>
     <maxRequestKiB>0</maxRequestKiB>
+    <remoteGUIPort>0</remoteGUIPort>
 </device>
 <device id="2CYF2WQ\-AKZO2QZ\-JAKWLYD\-AGHMQUM\-BGXUOIS\-GYILW34\-HJG3DUK\-LRRYQAR" name="syno local" compression="metadata" introducer="false" skipIntroductionRemovals="false" introducedBy="">
     <address>tcp://192.0.2.1:22001</address>
@@ -490,6 +520,7 @@ See folder\-copyRangeMethod for details.
     <maxSendKbps>100</maxSendKbps>
     <maxRecvKbps>100</maxRecvKbps>
     <maxRequestKiB>65536</maxRequestKiB>
+    <remoteGUIPort>8384</remoteGUIPort>
 </device>
 .ft P
 .fi
@@ -624,6 +655,13 @@ despite the config name looking like kilobits/second.
 .B maxRequestKiB
 Maximum amount of data to have outstanding in requests towards this device.
 Unit is kibibytes.
+.TP
+.B remoteGUIPort
+If set to a positive integer, the GUI will display an HTTP link to the IP
+address which is currently used for synchronization.  Only the TCP port is
+exchanged for the value specified here.  Note that any port forwarding or
+firewall settings need to be done manually and the link will probably not
+work for link\-local IPv6 addresses because of modern browser limitations.
 .UNINDENT
 .SH GUI ELEMENT
 .INDENT 0.0

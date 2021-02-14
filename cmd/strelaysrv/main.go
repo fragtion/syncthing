@@ -186,10 +186,10 @@ func main() {
 	}
 
 	wrapper := config.Wrap("config", config.New(id), id, events.NoopLogger)
-	wrapper.SetOptions(config.OptionsConfiguration{
-		NATLeaseM:   natLease,
-		NATRenewalM: natRenewal,
-		NATTimeoutS: natTimeout,
+	wrapper.Modify(func(cfg *config.Configuration) {
+		cfg.Options.NATLeaseM = natLease
+		cfg.Options.NATRenewalM = natRenewal
+		cfg.Options.NATTimeoutS = natTimeout
 	})
 	natSvc := nat.NewService(id, wrapper)
 	mapping := mapping{natSvc.NewMapping(nat.TCP, addr.IP, addr.Port)}
@@ -247,7 +247,7 @@ func main() {
 	for _, pool := range pools {
 		pool = strings.TrimSpace(pool)
 		if len(pool) > 0 {
-			go poolHandler(pool, uri, mapping)
+			go poolHandler(pool, uri, mapping, cert)
 		}
 	}
 

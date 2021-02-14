@@ -111,7 +111,12 @@ func (s *Service) Serve(ctx context.Context) error {
 		s.setExternalAddress(nil, "")
 	}()
 
-	util.OnDone(ctx, func() { _ = s.stunConn.Close() })
+	// Closing s.stunConn unblocks operations that use the connection
+	// (Discover, Keepalive) and might otherwise block us from returning.
+	go func() {
+		<-ctx.Done()
+		_ = s.stunConn.Close()
+	}()
 
 	timer := time.NewTimer(time.Millisecond)
 
@@ -196,7 +201,6 @@ func (s *Service) runStunForServer(ctx context.Context, addr string) {
 	}
 
 	s.setNATType(natType)
-	s.setExternalAddress(extAddr, addr)
 	l.Debugf("%s detected NAT type: %s via %s", s, natType, addr)
 
 	// We can't punch through this one, so no point doing keepalives
@@ -205,6 +209,8 @@ func (s *Service) runStunForServer(ctx context.Context, addr string) {
 		l.Debugf("%s cannot punch %s, skipping", s, natType)
 		return
 	}
+
+	s.setExternalAddress(extAddr, addr)
 
 	s.stunKeepAlive(ctx, addr, extAddr)
 }

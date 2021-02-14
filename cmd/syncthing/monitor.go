@@ -25,8 +25,8 @@ import (
 	"github.com/syncthing/syncthing/lib/locations"
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/sync"
-	"github.com/syncthing/syncthing/lib/util"
 )
 
 var (
@@ -44,12 +44,12 @@ const (
 	panicUploadNoticeWait = 10 * time.Second
 )
 
-func monitorMain(runtimeOptions RuntimeOptions) {
+func monitorMain(options serveOptions) {
 	l.SetPrefix("[monitor] ")
 
 	var dst io.Writer = os.Stdout
 
-	logFile := runtimeOptions.logFile
+	logFile := options.LogFile
 	if logFile != "-" {
 		if expanded, err := fs.ExpandTilde(logFile); err == nil {
 			logFile = expanded
@@ -59,8 +59,8 @@ func monitorMain(runtimeOptions RuntimeOptions) {
 		open := func(name string) (io.WriteCloser, error) {
 			return newAutoclosedFile(name, logFileAutoCloseDelay, logFileMaxOpenTime)
 		}
-		if runtimeOptions.logMaxSize > 0 {
-			fileDst, err = newRotatedFile(logFile, open, int64(runtimeOptions.logMaxSize), runtimeOptions.logMaxFiles)
+		if options.LogMaxSize > 0 {
+			fileDst, err = newRotatedFile(logFile, open, int64(options.LogMaxSize), options.LogMaxFiles)
 		} else {
 			fileDst, err = open(logFile)
 		}
@@ -99,7 +99,7 @@ func monitorMain(runtimeOptions RuntimeOptions) {
 
 		if t := time.Since(restarts[0]); t < loopThreshold {
 			l.Warnf("%d restarts in %v; not retrying further", countRestarts, t)
-			os.Exit(util.ExitError.AsInt())
+			os.Exit(svcutil.ExitError.AsInt())
 		}
 
 		copy(restarts[0:], restarts[1:])
@@ -169,15 +169,15 @@ func monitorMain(runtimeOptions RuntimeOptions) {
 
 		if err == nil {
 			// Successful exit indicates an intentional shutdown
-			os.Exit(util.ExitSuccess.AsInt())
+			os.Exit(svcutil.ExitSuccess.AsInt())
 		}
 
 		if exiterr, ok := err.(*exec.ExitError); ok {
 			exitCode := exiterr.ExitCode()
-			if stopped || runtimeOptions.noRestart {
+			if stopped || options.NoRestart {
 				os.Exit(exitCode)
 			}
-			if exitCode == util.ExitUpgrade.AsInt() {
+			if exitCode == svcutil.ExitUpgrade.AsInt() {
 				// Restart the monitor process to release the .old
 				// binary as part of the upgrade process.
 				l.Infoln("Restarting monitor...")
@@ -188,8 +188,8 @@ func monitorMain(runtimeOptions RuntimeOptions) {
 			}
 		}
 
-		if runtimeOptions.noRestart {
-			os.Exit(util.ExitError.AsInt())
+		if options.NoRestart {
+			os.Exit(svcutil.ExitError.AsInt())
 		}
 
 		l.Infoln("Syncthing exited:", err)
@@ -563,7 +563,7 @@ func childEnv() []string {
 // panicUploadMaxWait uploading panics...
 func maybeReportPanics() {
 	// Try to get a config to see if/where panics should be reported.
-	cfg, err := loadOrDefaultConfig(protocol.EmptyDeviceID, events.NoopLogger)
+	cfg, err := loadOrDefaultConfig(protocol.EmptyDeviceID, events.NoopLogger, true)
 	if err != nil {
 		l.Warnln("Couldn't load config; not reporting crash")
 		return

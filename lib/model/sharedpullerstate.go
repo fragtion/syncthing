@@ -192,7 +192,7 @@ func (s *sharedPullerState) tempFileInWritableDir(_ string) error {
 		size := s.file.Size
 		// Trailer added to encrypted files
 		if len(s.file.Encrypted) > 0 {
-			size += int64(s.file.ProtoSize() + 4)
+			size += encryptionTrailerSize(s.file)
 		}
 		// Truncate sets the size of the file. This creates a sparse file or a
 		// space reservation, depending on the underlying filesystem.
@@ -346,8 +346,7 @@ func (s *sharedPullerState) finalClose() (bool, error) {
 // folder from encrypted data we can extract this FileInfo from the end of
 // the file and regain the original metadata.
 func (s *sharedPullerState) finalizeEncrypted() error {
-	size := s.file.ProtoSize()
-	bs := make([]byte, 4+size)
+	bs := make([]byte, encryptionTrailerSize(s.file))
 	n, err := s.file.MarshalTo(bs)
 	if err != nil {
 		return err
@@ -364,9 +363,11 @@ func (s *sharedPullerState) finalizeEncrypted() error {
 		return err
 	}
 
-	s.file.Size += int64(len(bs))
-
 	return nil
+}
+
+func encryptionTrailerSize(file protocol.FileInfo) int64 {
+	return int64(file.ProtoSize()) + 4
 }
 
 // Progress returns the momentarily progress for the puller
@@ -375,6 +376,7 @@ func (s *sharedPullerState) Progress() *pullerProgress {
 	defer s.mut.RUnlock()
 	total := s.reused + s.copyTotal + s.pullTotal
 	done := total - s.copyNeeded - s.pullNeeded
+	file := len(s.file.Blocks)
 	return &pullerProgress{
 		Total:               total,
 		Reused:              s.reused,
@@ -382,8 +384,8 @@ func (s *sharedPullerState) Progress() *pullerProgress {
 		CopiedFromElsewhere: s.copyTotal - s.copyNeeded - s.copyOrigin,
 		Pulled:              s.pullTotal - s.pullNeeded,
 		Pulling:             s.pullNeeded,
-		BytesTotal:          blocksToSize(s.file.BlockSize(), total),
-		BytesDone:           blocksToSize(s.file.BlockSize(), done),
+		BytesTotal:          blocksToSize(total, file, s.file.BlockSize(), s.file.Size),
+		BytesDone:           blocksToSize(done, file, s.file.BlockSize(), s.file.Size),
 	}
 }
 
@@ -411,9 +413,12 @@ func (s *sharedPullerState) Available() []int {
 	return blocks
 }
 
-func blocksToSize(size int, num int) int64 {
-	if num < 2 {
-		return int64(size / 2)
+func blocksToSize(blocks, blocksInFile, blockSize int, fileSize int64) int64 {
+	// The last/only block has somewhere between 1 and blockSize bytes. We do
+	// not know whether the smaller block is part of the blocks and use an
+	// estimate assuming a random chance that the small block is contained.
+	if blocksInFile == 0 {
+		return 0
 	}
-	return int64(num-1)*int64(size) + int64(size/2)
+	return int64(blocks)*int64(blockSize) - (int64(blockSize)-fileSize%int64(blockSize))*int64(blocks)/int64(blocksInFile)
 }

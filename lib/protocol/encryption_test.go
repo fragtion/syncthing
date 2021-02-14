@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/syncthing/syncthing/lib/rand"
 )
 
 func TestEnDecryptName(t *testing.T) {
@@ -80,18 +82,63 @@ func TestEnDecryptFileInfo(t *testing.T) {
 		ModifiedS:   8080,
 		Blocks: []BlockInfo{
 			{
-				Size: 45,
-				Hash: []byte{1, 2, 3},
+				Offset: 0,
+				Size:   45,
+				Hash:   []byte{1, 2, 3},
+			},
+			{
+				Offset: 45,
+				Size:   45,
+				Hash:   []byte{1, 2, 3},
 			},
 		},
 	}
 
 	enc := encryptFileInfo(fi, &key)
+	if bytes.Equal(enc.Blocks[0].Hash, enc.Blocks[1].Hash) {
+		t.Error("block hashes should not repeat when on different offsets")
+	}
+	again := encryptFileInfo(fi, &key)
+	if !bytes.Equal(enc.Blocks[0].Hash, again.Blocks[0].Hash) {
+		t.Error("block hashes should remain stable (0)")
+	}
+	if !bytes.Equal(enc.Blocks[1].Hash, again.Blocks[1].Hash) {
+		t.Error("block hashes should remain stable (1)")
+	}
+
 	dec, err := DecryptFileInfo(enc, &key)
 	if err != nil {
 		t.Error(err)
 	}
 	if !reflect.DeepEqual(fi, dec) {
 		t.Error("mismatch after decryption")
+	}
+}
+
+func TestIsEncryptedParent(t *testing.T) {
+	comp := rand.String(maxPathComponent)
+	cases := []struct {
+		path string
+		is   bool
+	}{
+		{"", false},
+		{".", false},
+		{"/", false},
+		{"12" + encryptedDirExtension, false},
+		{"1" + encryptedDirExtension, true},
+		{"1" + encryptedDirExtension + "/b", false},
+		{"1" + encryptedDirExtension + "/bc", true},
+		{"1" + encryptedDirExtension + "/bcd", false},
+		{"1" + encryptedDirExtension + "/bc/foo", false},
+		{"1.12/22", false},
+		{"1" + encryptedDirExtension + "/bc/" + comp, true},
+		{"1" + encryptedDirExtension + "/bc/" + comp + "/" + comp, true},
+		{"1" + encryptedDirExtension + "/bc/" + comp + "a", false},
+		{"1" + encryptedDirExtension + "/bc/" + comp + "/a/" + comp, false},
+	}
+	for _, tc := range cases {
+		if res := IsEncryptedParent(tc.path); res != tc.is {
+			t.Errorf("%v: got %v, expected %v", tc.path, res, tc.is)
+		}
 	}
 }

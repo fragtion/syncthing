@@ -13,9 +13,7 @@
 package db
 
 import (
-	"errors"
 	"fmt"
-	"os"
 
 	"github.com/syncthing/syncthing/lib/db/backend"
 	"github.com/syncthing/syncthing/lib/fs"
@@ -38,14 +36,33 @@ type FileSet struct {
 // continue iteration, false to stop.
 type Iterator func(f protocol.FileIntf) bool
 
-func NewFileSet(folder string, fs fs.Filesystem, db *Lowlevel) *FileSet {
-	return &FileSet{
+func NewFileSet(folder string, fs fs.Filesystem, db *Lowlevel) (*FileSet, error) {
+	select {
+	case <-db.oneFileSetCreated:
+	default:
+		close(db.oneFileSetCreated)
+	}
+	meta, err := db.loadMetadataTracker(folder)
+	if err != nil {
+		db.handleFailure(err)
+		return nil, err
+	}
+	s := &FileSet{
 		folder:      folder,
 		fs:          fs,
 		db:          db,
-		meta:        db.loadMetadataTracker(folder),
+		meta:        meta,
 		updateMutex: sync.NewMutex(),
 	}
+	if id := s.IndexID(protocol.LocalDeviceID); id == 0 {
+		// No index ID set yet. We create one now.
+		id = protocol.NewIndexID()
+		err := s.db.setIndexID(protocol.LocalDeviceID[:], []byte(s.folder), id)
+		if err != nil && !backend.IsClosed(err) {
+			fatalError(err, fmt.Sprintf("%s Creating new IndexID", s.folder), s.db)
+		}
+	}
+	return s, nil
 }
 
 func (s *FileSet) Drop(device protocol.DeviceID) {
@@ -74,13 +91,6 @@ func (s *FileSet) Drop(device protocol.DeviceID) {
 		// announced from the remote is newer than our current sequence
 		// number.
 		s.meta.resetAll(device)
-		// Also reset the index ID, as we do want a full index retransfer
-		// if we ever reconnect, regardless of if the index ID changed.
-		if err := s.db.setIndexID(device[:], []byte(s.folder), 0); backend.IsClosed(err) {
-			return
-		} else if err != nil {
-			fatalError(err, opStr, s.db)
-		}
 	}
 
 	t, err := s.db.newReadWriteTransaction()
@@ -343,53 +353,6 @@ func (s *Snapshot) NeedSize(device protocol.DeviceID) Counts {
 	return s.meta.Counts(device, needFlag)
 }
 
-// LocalChangedFiles returns a paginated list of files that were changed locally.
-func (s *Snapshot) LocalChangedFiles(page, perpage int) []FileInfoTruncated {
-	if s.ReceiveOnlyChangedSize().TotalItems() == 0 {
-		return nil
-	}
-
-	files := make([]FileInfoTruncated, 0, perpage)
-
-	skip := (page - 1) * perpage
-	get := perpage
-
-	s.WithHaveTruncated(protocol.LocalDeviceID, func(f protocol.FileIntf) bool {
-		if !f.IsReceiveOnlyChanged() {
-			return true
-		}
-		if skip > 0 {
-			skip--
-			return true
-		}
-		ft := f.(FileInfoTruncated)
-		files = append(files, ft)
-		get--
-		return get > 0
-	})
-
-	return files
-}
-
-// RemoteNeedFolderFiles returns paginated list of currently needed files in
-// progress, queued, and to be queued on next puller iteration, as well as the
-// total number of files currently needed.
-func (s *Snapshot) RemoteNeedFolderFiles(device protocol.DeviceID, page, perpage int) []FileInfoTruncated {
-	files := make([]FileInfoTruncated, 0, perpage)
-	skip := (page - 1) * perpage
-	get := perpage
-	s.WithNeedTruncated(device, func(f protocol.FileIntf) bool {
-		if skip > 0 {
-			skip--
-			return true
-		}
-		files = append(files, f.(FileInfoTruncated))
-		get--
-		return get > 0
-	})
-	return files
-}
-
 func (s *Snapshot) WithBlocksHash(hash []byte, fn Iterator) {
 	opStr := fmt.Sprintf(`%s WithBlocksHash("%x")`, s.folder, hash)
 	l.Debugf(opStr)
@@ -411,16 +374,6 @@ func (s *FileSet) IndexID(device protocol.DeviceID) protocol.IndexID {
 	} else if err != nil {
 		fatalError(err, opStr, s.db)
 	}
-	if id == 0 && device == protocol.LocalDeviceID {
-		// No index ID set yet. We create one now.
-		id = protocol.NewIndexID()
-		err := s.db.setIndexID(device[:], []byte(s.folder), id)
-		if backend.IsClosed(err) {
-			return 0
-		} else if err != nil {
-			fatalError(err, opStr, s.db)
-		}
-	}
 	return id
 }
 
@@ -435,7 +388,7 @@ func (s *FileSet) SetIndexID(device protocol.DeviceID, id protocol.IndexID) {
 	}
 }
 
-func (s *FileSet) MtimeFS() *fs.MtimeFS {
+func (s *FileSet) MtimeFS() fs.Filesystem {
 	opStr := fmt.Sprintf("%s MtimeFS()", s.folder)
 	l.Debugf(opStr)
 	prefix, err := s.db.keyer.GenerateMtimesKey(nil, []byte(s.folder))
@@ -473,6 +426,7 @@ func DropFolder(db *Lowlevel, folder string) {
 		db.dropFolder,
 		db.dropMtimes,
 		db.dropFolderMeta,
+		db.dropFolderIndexIDs,
 		db.folderIdx.Delete,
 	}
 	for _, drop := range droppers {
@@ -486,7 +440,14 @@ func DropFolder(db *Lowlevel, folder string) {
 
 // DropDeltaIndexIDs removes all delta index IDs from the database.
 // This will cause a full index transmission on the next connection.
+// Must be called before using FileSets, i.e. before NewFileSet is called for
+// the first time.
 func DropDeltaIndexIDs(db *Lowlevel) {
+	select {
+	case <-db.oneFileSetCreated:
+		panic("DropDeltaIndexIDs must not be called after NewFileSet for the same Lowlevel")
+	default:
+	}
 	opStr := "DropDeltaIndexIDs"
 	l.Debugf(opStr)
 	dbi, err := db.NewPrefixIterator([]byte{KeyTypeIndexID})
@@ -542,14 +503,7 @@ func nativeFileIterator(fn Iterator) Iterator {
 }
 
 func fatalError(err error, opStr string, db *Lowlevel) {
-	if errors.Is(err, errEntryFromGlobalMissing) || errors.Is(err, errEmptyGlobal) {
-		// Inconsistency error, mark db for repair on next start.
-		if path := db.needsRepairPath(); path != "" {
-			if fd, err := os.Create(path); err == nil {
-				fd.Close()
-			}
-		}
-	}
+	db.checkErrorForRepair(err)
 	l.Warnf("Fatal error: %v: %v", opStr, err)
-	obfuscateAndPanic(err)
+	panic(ldbPathRe.ReplaceAllString(err.Error(), "$1 x: "))
 }

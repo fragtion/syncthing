@@ -8,22 +8,7 @@ package config
 
 import (
 	"sort"
-
-	"github.com/syncthing/syncthing/lib/protocol"
-	"github.com/syncthing/syncthing/lib/util"
 )
-
-func NewDeviceConfiguration(id protocol.DeviceID, name string) DeviceConfiguration {
-	d := DeviceConfiguration{
-		DeviceID: id,
-		Name:     name,
-	}
-
-	util.SetDefaults(&d)
-
-	d.prepare(nil)
-	return d
-}
 
 func (cfg DeviceConfiguration) Copy() DeviceConfiguration {
 	c := cfg
@@ -33,8 +18,6 @@ func (cfg DeviceConfiguration) Copy() DeviceConfiguration {
 	copy(c.AllowedNetworks, cfg.AllowedNetworks)
 	c.IgnoredFolders = make([]ObservedFolder, len(cfg.IgnoredFolders))
 	copy(c.IgnoredFolders, cfg.IgnoredFolders)
-	c.PendingFolders = make([]ObservedFolder, len(cfg.PendingFolders))
-	copy(c.PendingFolders, cfg.PendingFolders)
 	return c
 }
 
@@ -42,24 +25,14 @@ func (cfg *DeviceConfiguration) prepare(sharedFolders []string) {
 	if len(cfg.Addresses) == 0 || len(cfg.Addresses) == 1 && cfg.Addresses[0] == "" {
 		cfg.Addresses = []string{"dynamic"}
 	}
-	if len(cfg.AllowedNetworks) == 0 {
-		cfg.AllowedNetworks = []string{}
-	}
 
 	ignoredFolders := deduplicateObservedFoldersToMap(cfg.IgnoredFolders)
-	pendingFolders := deduplicateObservedFoldersToMap(cfg.PendingFolders)
-
-	for id := range ignoredFolders {
-		delete(pendingFolders, id)
-	}
 
 	for _, sharedFolder := range sharedFolders {
 		delete(ignoredFolders, sharedFolder)
-		delete(pendingFolders, sharedFolder)
 	}
 
 	cfg.IgnoredFolders = sortedObservedFolderSlice(ignoredFolders)
-	cfg.PendingFolders = sortedObservedFolderSlice(pendingFolders)
 }
 
 func (cfg *DeviceConfiguration) IgnoredFolder(folder string) bool {

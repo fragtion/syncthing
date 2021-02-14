@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/syncthing/syncthing/lib/config"
-	"github.com/syncthing/syncthing/lib/db"
-	"github.com/syncthing/syncthing/lib/db/backend"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/scanner"
@@ -27,7 +25,8 @@ func TestRecvOnlyRevertDeletes(t *testing.T) {
 
 	// Get us a model up and running
 
-	m, f := setupROFolder(t)
+	m, f, wcfgCancel := setupROFolder(t)
+	defer wcfgCancel()
 	ffs := f.Filesystem()
 	defer cleanupModel(m)
 
@@ -107,7 +106,8 @@ func TestRecvOnlyRevertNeeds(t *testing.T) {
 
 	// Get us a model up and running
 
-	m, f := setupROFolder(t)
+	m, f, wcfgCancel := setupROFolder(t)
+	defer wcfgCancel()
 	ffs := f.Filesystem()
 	defer cleanupModel(m)
 
@@ -195,7 +195,8 @@ func TestRecvOnlyRevertNeeds(t *testing.T) {
 func TestRecvOnlyUndoChanges(t *testing.T) {
 	// Get us a model up and running
 
-	m, f := setupROFolder(t)
+	m, f, wcfgCancel := setupROFolder(t)
+	defer wcfgCancel()
 	ffs := f.Filesystem()
 	defer cleanupModel(m)
 
@@ -263,7 +264,8 @@ func TestRecvOnlyUndoChanges(t *testing.T) {
 func TestRecvOnlyDeletedRemoteDrop(t *testing.T) {
 	// Get us a model up and running
 
-	m, f := setupROFolder(t)
+	m, f, wcfgCancel := setupROFolder(t)
+	defer wcfgCancel()
 	ffs := f.Filesystem()
 	defer cleanupModel(m)
 
@@ -326,7 +328,8 @@ func TestRecvOnlyDeletedRemoteDrop(t *testing.T) {
 func TestRecvOnlyRemoteUndoChanges(t *testing.T) {
 	// Get us a model up and running
 
-	m, f := setupROFolder(t)
+	m, f, wcfgCancel := setupROFolder(t)
+	defer wcfgCancel()
 	ffs := f.Filesystem()
 	defer cleanupModel(m)
 
@@ -393,9 +396,13 @@ func TestRecvOnlyRemoteUndoChanges(t *testing.T) {
 		return true
 	})
 	snap.Release()
-	m.Index(device1, "ro", files)
+	m.IndexUpdate(device1, "ro", files)
 
-	must(t, m.ScanFolder("ro"))
+	// Ensure the pull to resolve conflicts (content identical) happened
+	must(t, f.doInSync(func() error {
+		f.pull()
+		return nil
+	}))
 
 	size = receiveOnlyChangedSize(t, m, "ro")
 	if size.Files+size.Directories+size.Deleted != 0 {
@@ -441,19 +448,19 @@ func setupKnownFiles(t *testing.T, ffs fs.Filesystem, data []byte) []protocol.Fi
 	return knownFiles
 }
 
-func setupROFolder(t *testing.T) (*testModel, *receiveOnlyFolder) {
+func setupROFolder(t *testing.T) (*testModel, *receiveOnlyFolder, context.CancelFunc) {
 	t.Helper()
 
-	w := createTmpWrapper(defaultCfg)
+	w, cancel := createTmpWrapper(defaultCfg)
 	cfg := w.RawCopy()
 	fcfg := testFolderConfigFake()
 	fcfg.ID = "ro"
 	fcfg.Label = "ro"
 	fcfg.Type = config.FolderTypeReceiveOnly
 	cfg.Folders = []config.FolderConfiguration{fcfg}
-	w.Replace(cfg)
+	replace(t, w, cfg)
 
-	m := newModel(w, myID, "syncthing", "dev", db.NewLowlevel(backend.OpenMemory()), nil)
+	m := newModel(t, w, myID, "syncthing", "dev", nil)
 	m.ServeBackground()
 	<-m.started
 	must(t, m.ScanFolder("ro"))
@@ -462,7 +469,7 @@ func setupROFolder(t *testing.T) (*testModel, *receiveOnlyFolder) {
 	defer m.fmut.RUnlock()
 	f := m.folderRunners["ro"].(*receiveOnlyFolder)
 
-	return m, f
+	return m, f, cancel
 }
 
 func writeFile(fs fs.Filesystem, filename string, data []byte, perm fs.FileMode) error {

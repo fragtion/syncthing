@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shirou/gopsutil/disk"
+	"github.com/shirou/gopsutil/v3/disk"
 
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -29,24 +29,10 @@ var (
 
 const (
 	DefaultMarkerName          = ".stfolder"
+	EncryptionTokenName        = "syncthing-encryption_password_token"
 	maxConcurrentWritesDefault = 2
 	maxConcurrentWritesLimit   = 64
 )
-
-func NewFolderConfiguration(myID protocol.DeviceID, id, label string, fsType fs.FilesystemType, path string) FolderConfiguration {
-	f := FolderConfiguration{
-		ID:             id,
-		Label:          label,
-		Devices:        []FolderDeviceConfiguration{{DeviceID: myID}},
-		FilesystemType: fsType,
-		Path:           path,
-	}
-
-	util.SetDefaults(&f)
-
-	f.prepare(myID, nil)
-	return f
-}
 
 func (f FolderConfiguration) Copy() FolderConfiguration {
 	c := f
@@ -225,6 +211,10 @@ func (f *FolderConfiguration) prepare(myID protocol.DeviceID, existingDevices ma
 		f.MaxConcurrentWrites = maxConcurrentWritesDefault
 	} else if f.MaxConcurrentWrites > maxConcurrentWritesLimit {
 		f.MaxConcurrentWrites = maxConcurrentWritesLimit
+	}
+
+	if f.Type == FolderTypeReceiveEncrypted {
+		f.IgnorePerms = true
 	}
 }
 
