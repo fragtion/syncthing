@@ -7,11 +7,12 @@
 package fs
 
 import (
-	"crypto/md5"
 	"fmt"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/syncthing/syncthing/lib/sha256"
 )
 
 const (
@@ -50,13 +51,9 @@ func TempNameWithPrefix(name, prefix string) string {
 //	tdir := filepath.Dir(name)
 	tdir := ".stfolder"
 	tbase := filepath.Base(name)
-	hash := md5.New()
-	hash.Write([]byte(name))
-	tbase = fmt.Sprintf("%x.%s", hash.Sum(nil), tbase)
+	tbase = fmt.Sprintf("%x.%s", sha256.Sum256([]byte(name)), tbase)
 	if len(tbase) > maxFilenameLength {
-//		hash := md5.New()
-//		hash.Write([]byte(name))
-		tbase = fmt.Sprintf("%x", hash.Sum(nil))
+		tbase = fmt.Sprintf("%x", sha256.Sum256([]byte(name)))
 	}
 	tname := fmt.Sprintf("%s%s.tmp", prefix, tbase)
 	return filepath.Join(tdir, tname)

@@ -8,7 +8,6 @@ package db
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -21,7 +20,7 @@ import (
 // do not put restrictions on downgrades (e.g. for repairs after a bugfix).
 const (
 	dbVersion             = 14
-	dbMigrationVersion    = 15
+	dbMigrationVersion    = 16
 	dbMinSyncthingVersion = "v1.9.0"
 )
 
@@ -31,8 +30,6 @@ type migration struct {
 	minSyncthingVersion string
 	migration           func(prevSchema int) error
 }
-
-var errFolderMissing = errors.New("folder present in global list but missing in keyer index")
 
 type databaseDowngradeError struct {
 	minSyncthingVersion string
@@ -103,7 +100,7 @@ func (db *schemaUpdater) updateSchema() error {
 		{11, 11, "v1.6.0", db.updateSchemaTo11},
 		{13, 13, "v1.7.0", db.updateSchemaTo13},
 		{14, 14, "v1.9.0", db.updateSchemaTo14},
-		{14, 15, "v1.9.0", db.migration15},
+		{14, 16, "v1.9.0", db.checkRepairMigration},
 	}
 
 	for _, m := range migrations {
@@ -729,6 +726,9 @@ func (db *schemaUpdater) updateSchemaTo14(_ int) error {
 		defer t.close()
 
 		key, err = t.keyer.GenerateDeviceFileKey(key, folder, protocol.LocalDeviceID[:], nil)
+		if err != nil {
+			return err
+		}
 		it, err := t.NewPrefixIterator(key)
 		if err != nil {
 			return err
@@ -773,9 +773,10 @@ func (db *schemaUpdater) updateSchemaTo14(_ int) error {
 	return nil
 }
 
-func (db *schemaUpdater) migration15(_ int) error {
+func (db *schemaUpdater) checkRepairMigration(_ int) error {
 	for _, folder := range db.ListFolders() {
-		if _, err := db.recalcMeta(folder); err != nil {
+		_, err := db.getMetaAndCheckGCLocked(folder)
+		if err != nil {
 			return err
 		}
 	}

@@ -4,6 +4,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+//go:generate counterfeiter -o mocks/service.go --fake-name Service . Service
+
 package connections
 
 import (
@@ -242,7 +244,7 @@ func (s *service) handle(ctx context.Context) error {
 		// though, especially in the presence of NAT hairpinning, multiple
 		// clients between the same NAT gateway, and global discovery.
 		if remoteID == s.myID {
-			l.Infof("Connected to myself (%s) at %s - should not happen", remoteID, c)
+			l.Debugf("Connected to myself (%s) at %s", remoteID, c)
 			c.Close()
 			continue
 		}
@@ -333,13 +335,7 @@ func (s *service) handle(ctx context.Context) error {
 		isLAN := s.isLAN(c.RemoteAddr())
 		rd, wr := s.limiter.getLimiters(remoteID, c, isLAN)
 
-		var protoConn protocol.Connection
-		passwords := s.cfg.FolderPasswords(remoteID)
-		if len(passwords) > 0 {
-			protoConn = protocol.NewEncryptedConnection(passwords, remoteID, rd, wr, c, s.model, c, deviceCfg.Compression)
-		} else {
-			protoConn = protocol.NewConnection(remoteID, rd, wr, c, s.model, c, deviceCfg.Compression)
-		}
+		protoConn := protocol.NewConnection(remoteID, rd, wr, c, s.model, c, deviceCfg.Compression, s.cfg.FolderPasswords(remoteID))
 
 		l.Infof("Established secure connection to %s at %s", remoteID, c)
 
@@ -476,7 +472,7 @@ func (s *service) dialDevices(ctx context.Context, now time.Time, cfg config.Con
 	// doesn't have much effect, but it may result in getting up and running
 	// quicker if only a subset of configured devices are actually reachable
 	// (by prioritizing those that were reachable recently).
-	dialQueue.Sort(queue)
+	queue.Sort()
 
 	// Perform dials according to the queue, stopping when we've reached the
 	// allowed additional number of connections (if limited).
@@ -1021,7 +1017,7 @@ func (s *service) validateIdentity(c internalConn, expectedID protocol.DeviceID)
 	// though, especially in the presence of NAT hairpinning, multiple
 	// clients between the same NAT gateway, and global discovery.
 	if remoteID == s.myID {
-		l.Infof("Connected to myself (%s) at %s - should not happen", remoteID, c)
+		l.Debugf("Connected to myself (%s) at %s", remoteID, c)
 		c.Close()
 		return errors.New("connected to self")
 	}

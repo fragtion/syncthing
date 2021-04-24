@@ -151,12 +151,13 @@ type Snapshot struct {
 	fatalError func(error, string)
 }
 
-func (s *FileSet) Snapshot() *Snapshot {
+func (s *FileSet) Snapshot() (*Snapshot, error) {
 	opStr := fmt.Sprintf("%s Snapshot()", s.folder)
 	l.Debugf(opStr)
 	t, err := s.db.newReadOnlyTransaction()
 	if err != nil {
-		fatalError(err, opStr, s.db)
+		s.db.handleFailure(err)
+		return nil, err
 	}
 	return &Snapshot{
 		folder: s.folder,
@@ -165,7 +166,7 @@ func (s *FileSet) Snapshot() *Snapshot {
 		fatalError: func(err error, opStr string) {
 			fatalError(err, opStr, s.db)
 		},
-	}
+	}, nil
 }
 
 func (s *Snapshot) Release() {
@@ -311,7 +312,7 @@ func (s *Snapshot) DebugGlobalVersions(file string) VersionList {
 	opStr := fmt.Sprintf("%s DebugGlobalVersions(%v)", s.folder, file)
 	l.Debugf(opStr)
 	vl, err := s.t.getGlobalVersions(nil, []byte(s.folder), []byte(osutil.NormalizedFilename(file)))
-	if backend.IsClosed(err) {
+	if backend.IsClosed(err) || backend.IsNotFound(err) {
 		return VersionList{}
 	} else if err != nil {
 		s.fatalError(err, opStr)

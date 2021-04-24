@@ -103,6 +103,18 @@ func (t readOnlyTransaction) unmarshalTrunc(bs []byte, trunc bool) (protocol.Fil
 	return fi, nil
 }
 
+type blocksIndirectionError struct {
+	err error
+}
+
+func (e *blocksIndirectionError) Error() string {
+	return fmt.Sprintf("filling Blocks: %v", e.err)
+}
+
+func (e *blocksIndirectionError) Unwrap() error {
+	return e.err
+}
+
 // fillFileInfo follows the (possible) indirection of blocks and version
 // vector and fills it out.
 func (t readOnlyTransaction) fillFileInfo(fi *protocol.FileInfo) error {
@@ -113,7 +125,7 @@ func (t readOnlyTransaction) fillFileInfo(fi *protocol.FileInfo) error {
 		key = t.keyer.GenerateBlockListKey(key, fi.BlocksHash)
 		bs, err := t.Get(key)
 		if err != nil {
-			return fmt.Errorf("filling Blocks: %w", err)
+			return &blocksIndirectionError{err}
 		}
 		var bl BlockList
 		if err := bl.Unmarshal(bs); err != nil {
@@ -762,10 +774,8 @@ func (t readWriteTransaction) updateLocalNeed(keyBuf, folder, name []byte, add b
 }
 
 func Need(global FileVersion, haveLocal bool, localVersion protocol.Vector) bool {
-	// We never need an invalid file or a file without a valid version (just
-	// another way of expressing "invalid", really, until we fix that
-	// part...).
-	if global.IsInvalid() || global.Version.IsEmpty() {
+	// We never need a file without a valid version.
+	if global.Version.IsEmpty() {
 		return false
 	}
 	// We don't need a deleted file if we don't have it.

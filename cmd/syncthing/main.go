@@ -31,10 +31,15 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	"github.com/thejerf/suture/v4"
+
+	"github.com/syncthing/syncthing/cmd/syncthing/cli"
+	"github.com/syncthing/syncthing/cmd/syncthing/cmdutil"
 	"github.com/syncthing/syncthing/cmd/syncthing/decrypt"
 	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/db"
+	"github.com/syncthing/syncthing/lib/db/backend"
 	"github.com/syncthing/syncthing/lib/dialer"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
@@ -48,7 +53,6 @@ import (
 	"github.com/syncthing/syncthing/lib/upgrade"
 
 	"github.com/pkg/errors"
-	"github.com/thejerf/suture/v4"
 )
 
 const (
@@ -127,31 +131,33 @@ var (
 	errTooEarlyUpgrade      = fmt.Errorf("last upgrade happened less than %v ago, skipping", upgradeRetryInterval)
 )
 
-// The cli struct is the main entry point for the command line parser. The
+// The entrypoint struct is the main entry point for the command line parser. The
 // commands and options here are top level commands to syncthing.
-var cli struct {
+// Cli is just a placeholder for the help text (see main).
+var entrypoint struct {
 	Serve   serveOptions `cmd:"" help:"Run Syncthing"`
 	Decrypt decrypt.CLI  `cmd:"" help:"Decrypt or verify an encrypted folder"`
+	Cli     struct{}     `cmd:"" help:"Command line interface for Syncthing"`
 }
 
 // serveOptions are the options for the `syncthing serve` command.
 type serveOptions struct {
+	buildServeOptions
 	AllowNewerConfig bool   `help:"Allow loading newer than current config version"`
 	Audit            bool   `help:"Write events to audit file"`
 	AuditFile        string `name:"auditfile" placeholder:"PATH" help:"Specify audit file (use \"-\" for stdout, \"--\" for stderr)"`
 	BrowserOnly      bool   `help:"Open GUI in browser"`
-	ConfDir          string `name:"conf" placeholder:"PATH" help:"Set configuration directory (config and keys)"`
+	ConfDir          string `name:"config" placeholder:"PATH" help:"Set configuration directory (config and keys)"`
 	DataDir          string `name:"data" placeholder:"PATH" help:"Set data directory (database and logs)"`
 	DeviceID         bool   `help:"Show the device ID"`
 	GenerateDir      string `name:"generate" placeholder:"PATH" help:"Generate key and config in specified dir, then exit"`
 	GUIAddress       string `name:"gui-address" placeholder:"URL" help:"Override GUI address (e.g. \"http://192.0.2.42:8443\")"`
 	GUIAPIKey        string `name:"gui-apikey" placeholder:"API-KEY" help:"Override GUI API key"`
-	HideConsole      bool   `help:"Hide console window (Windows only)"`
 	HomeDir          string `name:"home" placeholder:"PATH" help:"Set configuration and data directory"`
-	LogFile          string `name:"logfile" placeholder:"PATH" help:"Log file name (see below)"`
-	LogFlags         int    `name:"logflags" placeholder:"BITS" help:"Select information in log line prefix (see below)"`
-	LogMaxFiles      int    `placeholder:"N" name:"log-max-old-files" help:"Number of old files to keep (zero to keep only current)"`
-	LogMaxSize       int    `placeholder:"BYTES" help:"Maximum size of any file (zero to disable log rotation)"`
+	LogFile          string `name:"logfile" default:"${logFile}" placeholder:"PATH" help:"Log file name (see below)"`
+	LogFlags         int    `name:"logflags" default:"${logFlags}" placeholder:"BITS" help:"Select information in log line prefix (see below)"`
+	LogMaxFiles      int    `placeholder:"N" default:"${logMaxFiles}" name:"log-max-old-files" help:"Number of old files to keep (zero to keep only current)"`
+	LogMaxSize       int    `placeholder:"BYTES" default:"${logMaxSize}" help:"Maximum size of any file (zero to disable log rotation)"`
 	NoBrowser        bool   `help:"Do not start browser"`
 	NoRestart        bool   `env:"STNORESTART" help:"Do not restart Syncthing when exiting due to API/GUI command, upgrade, or crash"`
 	NoDefaultFolder  bool   `env:"STNODEFAULTFOLDER" help:"Don't create the \"default\" folder on first startup"`
@@ -183,13 +189,15 @@ type serveOptions struct {
 	InternalInnerProcess bool `env:"STMONITORED" hidden:"1"`
 }
 
-func (options *serveOptions) setDefaults() {
-	options.LogFlags = log.Ltime
-	options.LogMaxSize = 10 << 20 // 10 MiB
-	options.LogMaxFiles = 3       // plus the current one
+func defaultVars() kong.Vars {
+	vars := kong.Vars{}
+
+	vars["logFlags"] = strconv.Itoa(log.Ltime)
+	vars["logMaxSize"] = strconv.Itoa(10 << 20) // 10 MiB
+	vars["logMaxFiles"] = "3"                   // plus the current one
 
 	if os.Getenv("STTRACE") != "" {
-		options.LogFlags = logger.DebugFlags
+		vars["logFlags"] = strconv.Itoa(logger.DebugFlags)
 	}
 
 	// On non-Windows, we explicitly default to "-" which means stdout. On
@@ -197,13 +205,26 @@ func (options *serveOptions) setDefaults() {
 	// default path, unless the user has manually specified "-" or
 	// something else.
 	if runtime.GOOS == "windows" {
-		options.LogFile = "default"
+		vars["logFile"] = "default"
 	} else {
-		options.LogFile = "-"
+		vars["logFile"] = "-"
 	}
+
+	return vars
 }
 
 func main() {
+	// The "cli" subcommand uses a different command line parser, and e.g. help
+	// gets mangled when integrating it as a subcommand -> detect it here at the
+	// beginning.
+	if len(os.Args) > 1 && os.Args[1] == "cli" {
+		if err := cli.Run(); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// First some massaging of the raw command line to fit the new model.
 	// Basically this means adding the default command at the front, and
 	// converting -options to --options.
@@ -227,11 +248,9 @@ func main() {
 		args = append([]string{"serve"}, convertLegacyArgs(args)...)
 	}
 
-	cli.Serve.setDefaults()
-
 	// Create a parser with an overridden help function to print our extra
 	// help info.
-	parser, err := kong.New(&cli, kong.Help(extraHelpPrinter))
+	parser, err := kong.New(&entrypoint, kong.Help(helpHandler), defaultVars())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -242,7 +261,7 @@ func main() {
 	parser.FatalIfErrorf(err)
 }
 
-func extraHelpPrinter(options kong.HelpOptions, ctx *kong.Context) error {
+func helpHandler(options kong.HelpOptions, ctx *kong.Context) error {
 	if err := kong.DefaultHelpPrinter(options, ctx); err != nil {
 		return err
 	}
@@ -272,24 +291,7 @@ func (options serveOptions) Run() error {
 	}
 
 	// Not set as default above because the strings can be really long.
-	var err error
-	homeSet := options.HomeDir != ""
-	confSet := options.ConfDir != ""
-	dataSet := options.DataDir != ""
-	switch {
-	case dataSet != confSet:
-		err = errors.New("either both or none of -conf and -data must be given, use -home to set both at once")
-	case homeSet && dataSet:
-		err = errors.New("-home must not be used together with -conf and -data")
-	case homeSet:
-		if err = setLocation(locations.ConfigBaseDir, options.HomeDir); err == nil {
-			err = setLocation(locations.DataBaseDir, options.HomeDir)
-		}
-	case dataSet:
-		if err = setLocation(locations.ConfigBaseDir, options.ConfDir); err == nil {
-			err = setLocation(locations.DataBaseDir, options.DataDir)
-		}
-	}
+	err := cmdutil.SetConfigDataLocationsFromFlags(options.HomeDir, options.ConfDir, options.DataDir)
 	if err != nil {
 		l.Warnln("Command line options:", err)
 		os.Exit(svcutil.ExitError.AsInt())
@@ -375,7 +377,8 @@ func (options serveOptions) Run() error {
 		release, err := checkUpgrade()
 		if err == nil {
 			// Use leveldb database locks to protect against concurrent upgrades
-			ldb, err := syncthing.OpenDBBackend(locations.Get(locations.Database), config.TuningAuto)
+			var ldb backend.Backend
+			ldb, err = syncthing.OpenDBBackend(locations.Get(locations.Database), config.TuningAuto)
 			if err != nil {
 				err = upgradeViaRest()
 			} else {
@@ -594,9 +597,7 @@ func syncthingMain(options serveOptions) {
 		l.Warnln("Failed to initialize config:", err)
 		os.Exit(svcutil.ExitError.AsInt())
 	}
-	if cfgService, ok := cfgWrapper.(suture.Service); ok {
-		earlyService.Add(cfgService)
-	}
+	earlyService.Add(cfgWrapper)
 
 	// Candidate builds should auto upgrade. Make sure the option is set,
 	// unless we are in a build where it's disabled or the STNOUPGRADE
@@ -1002,17 +1003,6 @@ func exitCodeForUpgrade(err error) int {
 		return svcutil.ExitNoUpgradeAvailable.AsInt()
 	}
 	return svcutil.ExitError.AsInt()
-}
-
-func setLocation(enum locations.BaseDirEnum, loc string) error {
-	if !filepath.IsAbs(loc) {
-		var err error
-		loc, err = filepath.Abs(loc)
-		if err != nil {
-			return err
-		}
-	}
-	return locations.SetBaseDir(enum, loc)
 }
 
 // convertLegacyArgs returns the slice of arguments with single dash long

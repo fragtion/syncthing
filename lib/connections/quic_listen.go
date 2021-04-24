@@ -4,7 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at http://mozilla.org/MPL/2.0/.
 
-// +build go1.14,!noquic,!go1.16
+// +build go1.14,!noquic,!go1.17
 
 package connections
 
@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/lucas-clemente/quic-go"
@@ -79,7 +80,7 @@ func (t *quicListener) OnExternalAddressChanged(address *stun.Host, via string) 
 }
 
 func (t *quicListener) serve(ctx context.Context) error {
-	network := strings.Replace(t.uri.Scheme, "quic", "udp", -1)
+	network := strings.ReplaceAll(t.uri.Scheme, "quic", "udp")
 
 	packetConn, err := net.ListenPacket(network, t.uri.Host)
 	if err != nil {
@@ -90,13 +91,17 @@ func (t *quicListener) serve(ctx context.Context) error {
 
 	svc, conn := stun.New(t.cfg, t, packetConn)
 	defer func() { _ = conn.Close() }()
+	wrapped := &stunConnQUICWrapper{
+		PacketConn: conn,
+		underlying: packetConn.(*net.UDPConn),
+	}
 
 	go svc.Serve(ctx)
 
-	registry.Register(t.uri.Scheme, conn)
-	defer registry.Unregister(t.uri.Scheme, conn)
+	registry.Register(t.uri.Scheme, wrapped)
+	defer registry.Unregister(t.uri.Scheme, wrapped)
 
-	listener, err := quic.Listen(conn, t.tlsCfg, quicConfig)
+	listener, err := quic.Listen(wrapped, t.tlsCfg, quicConfig)
 	if err != nil {
 		l.Infoln("Listen (BEP/quic):", err)
 		return err
@@ -170,7 +175,7 @@ func (t *quicListener) WANAddresses() []*url.URL {
 
 func (t *quicListener) LANAddresses() []*url.URL {
 	addrs := []*url.URL{t.uri}
-	network := strings.Replace(t.uri.Scheme, "quic", "udp", -1)
+	network := strings.ReplaceAll(t.uri.Scheme, "quic", "udp")
 	addrs = append(addrs, getURLsForAllAdaptersIfUnspecified(network, t.uri)...)
 	return addrs
 }
@@ -212,4 +217,19 @@ func (f *quicListenerFactory) New(uri *url.URL, cfg config.Wrapper, tlsCfg *tls.
 
 func (quicListenerFactory) Enabled(cfg config.Configuration) bool {
 	return true
+}
+
+type stunConnQUICWrapper struct {
+	net.PacketConn
+	underlying *net.UDPConn
+}
+
+// SetReadBuffer is required by QUIC < v0.20.0
+func (s *stunConnQUICWrapper) SetReadBuffer(size int) error {
+	return s.underlying.SetReadBuffer(size)
+}
+
+// SyscallConn is required by QUIC
+func (s *stunConnQUICWrapper) SyscallConn() (syscall.RawConn, error) {
+	return s.underlying.SyscallConn()
 }
