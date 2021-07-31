@@ -15,6 +15,7 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -339,6 +340,14 @@ func (f *caseFilesystem) Unhide(name string) error {
 	return f.Filesystem.Unhide(name)
 }
 
+func (f *caseFilesystem) underlying() (Filesystem, bool) {
+	return f.Filesystem, true
+}
+
+func (f *caseFilesystem) wrapperType() filesystemWrapperType {
+	return filesystemWrapperTypeCase
+}
+
 func (f *caseFilesystem) checkCase(name string) error {
 	var err error
 	if name, err = Canonicalize(name); err != nil {
@@ -367,14 +376,16 @@ func (f *caseFilesystem) checkCaseExisting(name string) error {
 	if err != nil {
 		return err
 	}
-	if realName != name {
+	// We normalize the normalization (hah!) of the strings before
+	// comparing, as we don't want to treat a normalization difference as a
+	// case conflict.
+	if norm.NFC.String(realName) != norm.NFC.String(name) {
 		return &ErrCaseConflict{name, realName}
 	}
 	return nil
 }
 
 type defaultRealCaser struct {
-	fs    Filesystem
 	cache caseCache
 }
 
@@ -384,13 +395,12 @@ func newDefaultRealCaser(fs Filesystem) *defaultRealCaser {
 	if err != nil {
 		panic(err)
 	}
-	caser := &defaultRealCaser{
-		fs: fs,
+	return &defaultRealCaser{
 		cache: caseCache{
+			fs:            fs,
 			TwoQueueCache: cache,
 		},
 	}
-	return caser
 }
 
 func (r *defaultRealCaser) realCase(name string) (string, error) {
@@ -402,34 +412,13 @@ func (r *defaultRealCaser) realCase(name string) (string, error) {
 	for _, comp := range PathComponents(name) {
 		node := r.cache.getExpireAdd(realName)
 
-		node.once.Do(func() {
-			dirNames, err := r.fs.DirNames(realName)
-			if err != nil {
-				r.cache.Remove(realName)
-				node.err = err
-				return
-			}
-
-			num := len(dirNames)
-			node.children = make(map[string]struct{}, num)
-			node.lowerToReal = make(map[string]string, num)
-			lastLower := ""
-			for _, n := range dirNames {
-				node.children[n] = struct{}{}
-				lower := UnicodeLowercase(n)
-				if lower != lastLower {
-					node.lowerToReal[lower] = n
-					lastLower = n
-				}
-			}
-		})
 		if node.err != nil {
 			return "", node.err
 		}
 
 		// Try to find a direct or case match
 		if _, ok := node.children[comp]; !ok {
-			comp, ok = node.lowerToReal[UnicodeLowercase(comp)]
+			comp, ok = node.lowerToReal[UnicodeLowercaseNormalized(comp)]
 			if !ok {
 				return "", ErrNotExist
 			}
@@ -445,10 +434,29 @@ func (r *defaultRealCaser) dropCache() {
 	r.cache.Purge()
 }
 
-func newCaseNode() *caseNode {
-	return &caseNode{
-		expires: time.Now().Add(caseCacheTimeout),
+type caseCache struct {
+	*lru.TwoQueueCache
+	fs  Filesystem
+	mut sync.Mutex
+}
+
+// getExpireAdd gets an entry for the given key. If no entry exists, or it is
+// expired a new one is created and added to the cache.
+func (c *caseCache) getExpireAdd(key string) *caseNode {
+	c.mut.Lock()
+	defer c.mut.Unlock()
+	v, ok := c.Get(key)
+	if !ok {
+		node := newCaseNode(key, c.fs)
+		c.Add(key, node)
+		return node
 	}
+	node := v.(*caseNode)
+	if node.expires.Before(time.Now()) {
+		node = newCaseNode(key, c.fs)
+		c.Add(key, node)
+	}
+	return node
 }
 
 // The keys to children are "real", case resolved names of the path
@@ -462,30 +470,32 @@ type caseNode struct {
 	expires     time.Time
 	lowerToReal map[string]string
 	children    map[string]struct{}
-	once        sync.Once
 	err         error
 }
 
-type caseCache struct {
-	*lru.TwoQueueCache
-	mut sync.Mutex
-}
-
-// getExpireAdd gets an entry for the given key. If no entry exists, or it is
-// expired a new one is created and added to the cache.
-func (c *caseCache) getExpireAdd(key string) *caseNode {
-	c.mut.Lock()
-	defer c.mut.Unlock()
-	v, ok := c.Get(key)
-	if !ok {
-		node := newCaseNode()
-		c.Add(key, node)
+func newCaseNode(name string, filesystem Filesystem) *caseNode {
+	node := new(caseNode)
+	dirNames, err := filesystem.DirNames(name)
+	// Set expiry after calling DirNames in case this is super-slow
+	// (e.g. dirs with many children on android)
+	node.expires = time.Now().Add(caseCacheTimeout)
+	if err != nil {
+		node.err = err
 		return node
 	}
-	node := v.(*caseNode)
-	if node.expires.Before(time.Now()) {
-		node = newCaseNode()
-		c.Add(key, node)
+
+	num := len(dirNames)
+	node.children = make(map[string]struct{}, num)
+	node.lowerToReal = make(map[string]string, num)
+	lastLower := ""
+	for _, n := range dirNames {
+		node.children[n] = struct{}{}
+		lower := UnicodeLowercaseNormalized(n)
+		if lower != lastLower {
+			node.lowerToReal[lower] = n
+			lastLower = n
+		}
 	}
+
 	return node
 }

@@ -32,16 +32,25 @@ func responseToBArray(response *http.Response) ([]byte, error) {
 
 func emptyPost(url string) cli.ActionFunc {
 	return func(c *cli.Context) error {
-		client := c.App.Metadata["client"].(*APIClient)
-		_, err := client.Post(url, "")
+		client, err := getClientFactory(c).getClient()
+		if err != nil {
+			return err
+		}
+		_, err = client.Post(url, "")
 		return err
 	}
 }
 
 func indexDumpOutput(url string) cli.ActionFunc {
 	return func(c *cli.Context) error {
-		client := c.App.Metadata["client"].(*APIClient)
+		client, err := getClientFactory(c).getClient()
+		if err != nil {
+			return err
+		}
 		response, err := client.Get(url)
+		if errors.Is(err, errNotFound) {
+			return errors.New("not found (folder/file not in database)")
+		}
 		if err != nil {
 			return err
 		}
@@ -51,7 +60,10 @@ func indexDumpOutput(url string) cli.ActionFunc {
 
 func saveToFile(url string) cli.ActionFunc {
 	return func(c *cli.Context) error {
-		client := c.App.Metadata["client"].(*APIClient)
+		client, err := getClientFactory(c).getClient()
+		if err != nil {
+			return err
+		}
 		response, err := client.Get(url)
 		if err != nil {
 			return err
@@ -82,7 +94,7 @@ func saveToFile(url string) cli.ActionFunc {
 	}
 }
 
-func getConfig(c *APIClient) (config.Configuration, error) {
+func getConfig(c APIClient) (config.Configuration, error) {
 	cfg := config.Configuration{}
 	response, err := c.Get("system/config")
 	if err != nil {
@@ -146,4 +158,8 @@ func nulString(bs []byte) string {
 
 func normalizePath(path string) string {
 	return filepath.ToSlash(filepath.Clean(path))
+}
+
+func getClientFactory(c *cli.Context) *apiClientFactory {
+	return c.App.Metadata["clientFactory"].(*apiClientFactory)
 }

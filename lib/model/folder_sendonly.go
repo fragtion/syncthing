@@ -12,6 +12,7 @@ import (
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/util"
 	"github.com/syncthing/syncthing/lib/versioner"
 )
 
@@ -23,7 +24,7 @@ type sendOnlyFolder struct {
 	folder
 }
 
-func newSendOnlyFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, _ versioner.Versioner, evLogger events.Logger, ioLimiter *byteSemaphore) service {
+func newSendOnlyFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, _ versioner.Versioner, evLogger events.Logger, ioLimiter *util.Semaphore) service {
 	f := &sendOnlyFolder{
 		folder: newFolder(model, fset, ignores, cfg, evLogger, ioLimiter, nil),
 	}
@@ -37,8 +38,10 @@ func (f *sendOnlyFolder) PullErrors() []FileError {
 
 // pull checks need for files that only differ by metadata (no changes on disk)
 func (f *sendOnlyFolder) pull() (bool, error) {
-	batch := make([]protocol.FileInfo, 0, maxBatchSizeFiles)
-	batchSizeBytes := 0
+	batch := db.NewFileInfoBatch(func(files []protocol.FileInfo) error {
+		f.updateLocalsFromPulling(files)
+		return nil
+	})
 
 	snap, err := f.dbSnapshot()
 	if err != nil {
@@ -46,45 +49,40 @@ func (f *sendOnlyFolder) pull() (bool, error) {
 	}
 	defer snap.Release()
 	snap.WithNeed(protocol.LocalDeviceID, func(intf protocol.FileIntf) bool {
-		if len(batch) == maxBatchSizeFiles || batchSizeBytes > maxBatchSizeBytes {
-			f.updateLocalsFromPulling(batch)
-			batch = batch[:0]
-			batchSizeBytes = 0
-		}
+		batch.FlushIfFull()
+
+		file := intf.(protocol.FileInfo)
 
 		if f.ignores.ShouldIgnore(intf.FileName()) {
-			file := intf.(protocol.FileInfo)
 			file.SetIgnored()
-			batch = append(batch, file)
-			batchSizeBytes += file.ProtoSize()
+			batch.Append(file)
 			l.Debugln(f, "Handling ignored file", file)
 			return true
 		}
 
 		curFile, ok := snap.Get(protocol.LocalDeviceID, intf.FileName())
 		if !ok {
-			if intf.IsDeleted() {
+			if intf.IsInvalid() {
+				// Global invalid file just exists for need accounting
+				batch.Append(file)
+			} else if intf.IsDeleted() {
 				l.Debugln("Should never get a deleted file as needed when we don't have it")
 				f.evLogger.Log(events.Failure, "got deleted file that doesn't exist locally as needed when pulling on send-only")
 			}
 			return true
 		}
 
-		file := intf.(protocol.FileInfo)
 		if !file.IsEquivalentOptional(curFile, f.modTimeWindow, f.IgnorePerms, false, 0) {
 			return true
 		}
 
-		batch = append(batch, file)
-		batchSizeBytes += file.ProtoSize()
+		batch.Append(file)
 		l.Debugln(f, "Merging versions of identical file", file)
 
 		return true
 	})
 
-	if len(batch) > 0 {
-		f.updateLocalsFromPulling(batch)
-	}
+	batch.Flush()
 
 	return true, nil
 }
@@ -99,8 +97,10 @@ func (f *sendOnlyFolder) override() error {
 	f.setState(FolderScanning)
 	defer f.setState(FolderIdle)
 
-	batch := make([]protocol.FileInfo, 0, maxBatchSizeFiles)
-	batchSizeBytes := 0
+	batch := db.NewFileInfoBatch(func(files []protocol.FileInfo) error {
+		f.updateLocalsFromScanning(files)
+		return nil
+	})
 	snap, err := f.dbSnapshot()
 	if err != nil {
 		return err
@@ -108,11 +108,7 @@ func (f *sendOnlyFolder) override() error {
 	defer snap.Release()
 	snap.WithNeed(protocol.LocalDeviceID, func(fi protocol.FileIntf) bool {
 		need := fi.(protocol.FileInfo)
-		if len(batch) == maxBatchSizeFiles || batchSizeBytes > maxBatchSizeBytes {
-			f.updateLocalsFromScanning(batch)
-			batch = batch[:0]
-			batchSizeBytes = 0
-		}
+		_ = batch.FlushIfFull()
 
 		have, ok := snap.Get(protocol.LocalDeviceID, need.Name)
 		// Don't override files that are in a bad state (ignored,
@@ -129,12 +125,8 @@ func (f *sendOnlyFolder) override() error {
 			need = have
 		}
 		need.Sequence = 0
-		batch = append(batch, need)
-		batchSizeBytes += need.ProtoSize()
+		batch.Append(need)
 		return true
 	})
-	if len(batch) > 0 {
-		f.updateLocalsFromScanning(batch)
-	}
-	return nil
+	return batch.Flush()
 }

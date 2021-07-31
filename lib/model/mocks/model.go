@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/syncthing/syncthing/lib/db"
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/model"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/stats"
@@ -176,6 +177,29 @@ type Model struct {
 		result1 map[protocol.DeviceID]stats.DeviceStatistics
 		result2 error
 	}
+	DismissPendingDeviceStub        func(protocol.DeviceID) error
+	dismissPendingDeviceMutex       sync.RWMutex
+	dismissPendingDeviceArgsForCall []struct {
+		arg1 protocol.DeviceID
+	}
+	dismissPendingDeviceReturns struct {
+		result1 error
+	}
+	dismissPendingDeviceReturnsOnCall map[int]struct {
+		result1 error
+	}
+	DismissPendingFolderStub        func(protocol.DeviceID, string) error
+	dismissPendingFolderMutex       sync.RWMutex
+	dismissPendingFolderArgsForCall []struct {
+		arg1 protocol.DeviceID
+		arg2 string
+	}
+	dismissPendingFolderReturns struct {
+		result1 error
+	}
+	dismissPendingFolderReturnsOnCall map[int]struct {
+		result1 error
+	}
 	DownloadProgressStub        func(protocol.DeviceID, string, []protocol.FileDownloadProgressUpdate) error
 	downloadProgressMutex       sync.RWMutex
 	downloadProgressArgsForCall []struct {
@@ -248,6 +272,20 @@ type Model struct {
 	}
 	getHelloReturnsOnCall map[int]struct {
 		result1 protocol.HelloIntf
+	}
+	GetMtimeMappingStub        func(string, string) (fs.MtimeMapping, error)
+	getMtimeMappingMutex       sync.RWMutex
+	getMtimeMappingArgsForCall []struct {
+		arg1 string
+		arg2 string
+	}
+	getMtimeMappingReturns struct {
+		result1 fs.MtimeMapping
+		result2 error
+	}
+	getMtimeMappingReturnsOnCall map[int]struct {
+		result1 fs.MtimeMapping
+		result2 error
 	}
 	GlobalDirectoryTreeStub        func(string, string, int, bool) ([]*model.TreeEntry, error)
 	globalDirectoryTreeMutex       sync.RWMutex
@@ -1317,6 +1355,129 @@ func (fake *Model) DeviceStatisticsReturnsOnCall(i int, result1 map[protocol.Dev
 	}{result1, result2}
 }
 
+func (fake *Model) DismissPendingDevice(arg1 protocol.DeviceID) error {
+	fake.dismissPendingDeviceMutex.Lock()
+	ret, specificReturn := fake.dismissPendingDeviceReturnsOnCall[len(fake.dismissPendingDeviceArgsForCall)]
+	fake.dismissPendingDeviceArgsForCall = append(fake.dismissPendingDeviceArgsForCall, struct {
+		arg1 protocol.DeviceID
+	}{arg1})
+	stub := fake.DismissPendingDeviceStub
+	fakeReturns := fake.dismissPendingDeviceReturns
+	fake.recordInvocation("DismissPendingDevice", []interface{}{arg1})
+	fake.dismissPendingDeviceMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *Model) DismissPendingDeviceCallCount() int {
+	fake.dismissPendingDeviceMutex.RLock()
+	defer fake.dismissPendingDeviceMutex.RUnlock()
+	return len(fake.dismissPendingDeviceArgsForCall)
+}
+
+func (fake *Model) DismissPendingDeviceCalls(stub func(protocol.DeviceID) error) {
+	fake.dismissPendingDeviceMutex.Lock()
+	defer fake.dismissPendingDeviceMutex.Unlock()
+	fake.DismissPendingDeviceStub = stub
+}
+
+func (fake *Model) DismissPendingDeviceArgsForCall(i int) protocol.DeviceID {
+	fake.dismissPendingDeviceMutex.RLock()
+	defer fake.dismissPendingDeviceMutex.RUnlock()
+	argsForCall := fake.dismissPendingDeviceArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *Model) DismissPendingDeviceReturns(result1 error) {
+	fake.dismissPendingDeviceMutex.Lock()
+	defer fake.dismissPendingDeviceMutex.Unlock()
+	fake.DismissPendingDeviceStub = nil
+	fake.dismissPendingDeviceReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *Model) DismissPendingDeviceReturnsOnCall(i int, result1 error) {
+	fake.dismissPendingDeviceMutex.Lock()
+	defer fake.dismissPendingDeviceMutex.Unlock()
+	fake.DismissPendingDeviceStub = nil
+	if fake.dismissPendingDeviceReturnsOnCall == nil {
+		fake.dismissPendingDeviceReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.dismissPendingDeviceReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *Model) DismissPendingFolder(arg1 protocol.DeviceID, arg2 string) error {
+	fake.dismissPendingFolderMutex.Lock()
+	ret, specificReturn := fake.dismissPendingFolderReturnsOnCall[len(fake.dismissPendingFolderArgsForCall)]
+	fake.dismissPendingFolderArgsForCall = append(fake.dismissPendingFolderArgsForCall, struct {
+		arg1 protocol.DeviceID
+		arg2 string
+	}{arg1, arg2})
+	stub := fake.DismissPendingFolderStub
+	fakeReturns := fake.dismissPendingFolderReturns
+	fake.recordInvocation("DismissPendingFolder", []interface{}{arg1, arg2})
+	fake.dismissPendingFolderMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *Model) DismissPendingFolderCallCount() int {
+	fake.dismissPendingFolderMutex.RLock()
+	defer fake.dismissPendingFolderMutex.RUnlock()
+	return len(fake.dismissPendingFolderArgsForCall)
+}
+
+func (fake *Model) DismissPendingFolderCalls(stub func(protocol.DeviceID, string) error) {
+	fake.dismissPendingFolderMutex.Lock()
+	defer fake.dismissPendingFolderMutex.Unlock()
+	fake.DismissPendingFolderStub = stub
+}
+
+func (fake *Model) DismissPendingFolderArgsForCall(i int) (protocol.DeviceID, string) {
+	fake.dismissPendingFolderMutex.RLock()
+	defer fake.dismissPendingFolderMutex.RUnlock()
+	argsForCall := fake.dismissPendingFolderArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *Model) DismissPendingFolderReturns(result1 error) {
+	fake.dismissPendingFolderMutex.Lock()
+	defer fake.dismissPendingFolderMutex.Unlock()
+	fake.DismissPendingFolderStub = nil
+	fake.dismissPendingFolderReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *Model) DismissPendingFolderReturnsOnCall(i int, result1 error) {
+	fake.dismissPendingFolderMutex.Lock()
+	defer fake.dismissPendingFolderMutex.Unlock()
+	fake.DismissPendingFolderStub = nil
+	if fake.dismissPendingFolderReturnsOnCall == nil {
+		fake.dismissPendingFolderReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.dismissPendingFolderReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
 func (fake *Model) DownloadProgress(arg1 protocol.DeviceID, arg2 string, arg3 []protocol.FileDownloadProgressUpdate) error {
 	var arg3Copy []protocol.FileDownloadProgressUpdate
 	if arg3 != nil {
@@ -1689,6 +1850,71 @@ func (fake *Model) GetHelloReturnsOnCall(i int, result1 protocol.HelloIntf) {
 	fake.getHelloReturnsOnCall[i] = struct {
 		result1 protocol.HelloIntf
 	}{result1}
+}
+
+func (fake *Model) GetMtimeMapping(arg1 string, arg2 string) (fs.MtimeMapping, error) {
+	fake.getMtimeMappingMutex.Lock()
+	ret, specificReturn := fake.getMtimeMappingReturnsOnCall[len(fake.getMtimeMappingArgsForCall)]
+	fake.getMtimeMappingArgsForCall = append(fake.getMtimeMappingArgsForCall, struct {
+		arg1 string
+		arg2 string
+	}{arg1, arg2})
+	stub := fake.GetMtimeMappingStub
+	fakeReturns := fake.getMtimeMappingReturns
+	fake.recordInvocation("GetMtimeMapping", []interface{}{arg1, arg2})
+	fake.getMtimeMappingMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *Model) GetMtimeMappingCallCount() int {
+	fake.getMtimeMappingMutex.RLock()
+	defer fake.getMtimeMappingMutex.RUnlock()
+	return len(fake.getMtimeMappingArgsForCall)
+}
+
+func (fake *Model) GetMtimeMappingCalls(stub func(string, string) (fs.MtimeMapping, error)) {
+	fake.getMtimeMappingMutex.Lock()
+	defer fake.getMtimeMappingMutex.Unlock()
+	fake.GetMtimeMappingStub = stub
+}
+
+func (fake *Model) GetMtimeMappingArgsForCall(i int) (string, string) {
+	fake.getMtimeMappingMutex.RLock()
+	defer fake.getMtimeMappingMutex.RUnlock()
+	argsForCall := fake.getMtimeMappingArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *Model) GetMtimeMappingReturns(result1 fs.MtimeMapping, result2 error) {
+	fake.getMtimeMappingMutex.Lock()
+	defer fake.getMtimeMappingMutex.Unlock()
+	fake.GetMtimeMappingStub = nil
+	fake.getMtimeMappingReturns = struct {
+		result1 fs.MtimeMapping
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *Model) GetMtimeMappingReturnsOnCall(i int, result1 fs.MtimeMapping, result2 error) {
+	fake.getMtimeMappingMutex.Lock()
+	defer fake.getMtimeMappingMutex.Unlock()
+	fake.GetMtimeMappingStub = nil
+	if fake.getMtimeMappingReturnsOnCall == nil {
+		fake.getMtimeMappingReturnsOnCall = make(map[int]struct {
+			result1 fs.MtimeMapping
+			result2 error
+		})
+	}
+	fake.getMtimeMappingReturnsOnCall[i] = struct {
+		result1 fs.MtimeMapping
+		result2 error
+	}{result1, result2}
 }
 
 func (fake *Model) GlobalDirectoryTree(arg1 string, arg2 string, arg3 int, arg4 bool) ([]*model.TreeEntry, error) {
@@ -3174,6 +3400,10 @@ func (fake *Model) Invocations() map[string][][]interface{} {
 	defer fake.delayScanMutex.RUnlock()
 	fake.deviceStatisticsMutex.RLock()
 	defer fake.deviceStatisticsMutex.RUnlock()
+	fake.dismissPendingDeviceMutex.RLock()
+	defer fake.dismissPendingDeviceMutex.RUnlock()
+	fake.dismissPendingFolderMutex.RLock()
+	defer fake.dismissPendingFolderMutex.RUnlock()
 	fake.downloadProgressMutex.RLock()
 	defer fake.downloadProgressMutex.RUnlock()
 	fake.folderErrorsMutex.RLock()
@@ -3186,6 +3416,8 @@ func (fake *Model) Invocations() map[string][][]interface{} {
 	defer fake.getFolderVersionsMutex.RUnlock()
 	fake.getHelloMutex.RLock()
 	defer fake.getHelloMutex.RUnlock()
+	fake.getMtimeMappingMutex.RLock()
+	defer fake.getMtimeMappingMutex.RUnlock()
 	fake.globalDirectoryTreeMutex.RLock()
 	defer fake.globalDirectoryTreeMutex.RUnlock()
 	fake.indexMutex.RLock()

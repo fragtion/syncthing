@@ -45,7 +45,9 @@ type quicDialer struct {
 func (d *quicDialer) Dial(ctx context.Context, _ protocol.DeviceID, uri *url.URL) (internalConn, error) {
 	uri = fixupPort(uri, config.DefaultQUICPort)
 
-	addr, err := net.ResolveUDPAddr("udp", uri.Host)
+	network := quicNetwork(uri)
+
+	addr, err := net.ResolveUDPAddr(network, uri.Host)
 	if err != nil {
 		return internalConn{}, err
 	}
@@ -93,8 +95,15 @@ func (d *quicDialer) Dial(ctx context.Context, _ protocol.DeviceID, uri *url.URL
 type quicDialerFactory struct{}
 
 func (quicDialerFactory) New(opts config.OptionsConfiguration, tlsCfg *tls.Config) genericDialer {
+	// So the idea is that we should probably try dialing every 20 seconds.
+	// However it would still be nice if this was adjustable/proportional to ReconnectIntervalS
+	// But prevent something silly like 1/3 = 0 etc.
+	quicInterval := opts.ReconnectIntervalS / 3
+	if quicInterval < 10 {
+		quicInterval = 10
+	}
 	return &quicDialer{commonDialer{
-		reconnectInterval: time.Duration(opts.ReconnectIntervalS) * time.Second,
+		reconnectInterval: time.Duration(quicInterval) * time.Second,
 		tlsCfg:            tlsCfg,
 	}}
 }

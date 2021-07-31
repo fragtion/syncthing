@@ -472,7 +472,6 @@ func TestNeedWithInvalid(t *testing.T) {
 		remote0Have[0],
 		remote1Have[0],
 		remote0Have[2],
-		remote1Have[2],
 	}
 
 	replace(s, protocol.LocalDeviceID, localHave)
@@ -1783,6 +1782,41 @@ func TestConcurrentIndexID(t *testing.T) {
 			t.Fatalf("IDs differ after %v rounds", i)
 		}
 	}
+}
+
+func TestNeedRemoveLastValid(t *testing.T) {
+	db := newLowlevelMemory(t)
+	defer db.Close()
+
+	folder := "test"
+	testFs := fs.NewFilesystem(fs.FilesystemTypeFake, "")
+
+	fs := newFileSet(t, folder, testFs, db)
+
+	files := []protocol.FileInfo{
+		{Name: "foo", Version: protocol.Vector{}.Update(myID), Sequence: 1},
+	}
+	fs.Update(remoteDevice0, files)
+	files[0].Version = files[0].Version.Update(myID)
+	fs.Update(remoteDevice1, files)
+	files[0].LocalFlags = protocol.FlagLocalIgnored
+	fs.Update(protocol.LocalDeviceID, files)
+
+	snap := snapshot(t, fs)
+	c := snap.NeedSize(remoteDevice0)
+	if c.Files != 1 {
+		t.Errorf("Expected 1 needed files initially, got %v", c.Files)
+	}
+	snap.Release()
+
+	fs.Drop(remoteDevice1)
+
+	snap = snapshot(t, fs)
+	c = snap.NeedSize(remoteDevice0)
+	if c.Files != 0 {
+		t.Errorf("Expected no needed files, got %v", c.Files)
+	}
+	snap.Release()
 }
 
 func replace(fs *db.FileSet, device protocol.DeviceID, files []protocol.FileInfo) {

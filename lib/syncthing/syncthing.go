@@ -110,7 +110,8 @@ func (a *App) Start() error {
 	a.stopped = make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	a.mainServiceCancel = cancel
-	go a.run(ctx)
+	errChan := a.mainService.ServeBackground(ctx)
+	go a.wait(errChan)
 
 	if err := a.startup(); err != nil {
 		a.stopWithErr(svcutil.ExitError, err)
@@ -255,7 +256,13 @@ func (a *App) startup() error {
 	// The TLS configuration is used for both the listening socket and outgoing
 	// connections.
 
-	tlsCfg := tlsutil.SecureDefault()
+	var tlsCfg *tls.Config
+	if a.cfg.Options().InsecureAllowOldTLSVersions {
+		l.Infoln("TLS 1.2 is allowed on sync connections. This is less than optimally secure.")
+		tlsCfg = tlsutil.SecureDefaultWithTLS12()
+	} else {
+		tlsCfg = tlsutil.SecureDefaultTLS13()
+	}
 	tlsCfg.Certificates = []tls.Certificate{a.cert}
 	tlsCfg.NextProtos = []string{bepProtocolName}
 	tlsCfg.ClientAuth = tls.RequestClientCert
@@ -328,8 +335,8 @@ func (a *App) startup() error {
 	return nil
 }
 
-func (a *App) run(ctx context.Context) {
-	err := a.mainService.Serve(ctx)
+func (a *App) wait(errChan <-chan error) {
+	err := <-errChan
 	a.handleMainServiceError(err)
 
 	done := make(chan struct{})

@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -50,7 +49,9 @@ var (
 	benchRun       string
 	debugBinary    bool
 	coverage       bool
+	long           bool
 	timeout        = "120s"
+	longTimeout    = "600s"
 	numVersions    = 5
 	withNextGenGUI = os.Getenv("BUILD_NEXT_GEN_GUI") != ""
 )
@@ -200,18 +201,6 @@ var targets = map[string]target{
 			{src: "AUTHORS", dst: "deb/usr/share/doc/syncthing-relaypoolsrv/AUTHORS.txt", perm: 0644},
 		},
 	},
-}
-
-// These are repos we need to clone to run "go generate"
-
-type dependencyRepo struct {
-	path   string
-	repo   string
-	commit string
-}
-
-var dependencyRepos = []dependencyRepo{
-	{path: "xdr", repo: "https://github.com/calmh/xdr.git", commit: "08e072f9cb16"},
 }
 
 func initTargets() {
@@ -375,6 +364,7 @@ func parseFlags() {
 	flag.StringVar(&cc, "cc", os.Getenv("CC"), "Set CC environment variable for `go build`")
 	flag.BoolVar(&debugBinary, "debug-binary", debugBinary, "Create unoptimized binary to use with delve, set -gcflags='-N -l' and omit -ldflags")
 	flag.BoolVar(&coverage, "coverage", coverage, "Write coverage profile of tests to coverage.txt")
+	flag.BoolVar(&long, "long", long, "Run tests without the -short flag")
 	flag.IntVar(&numVersions, "num-versions", numVersions, "Number of versions for changelog command")
 	flag.StringVar(&run, "run", "", "Specify which tests to run")
 	flag.StringVar(&benchRun, "bench", "", "Specify which benchmarks to run")
@@ -386,7 +376,13 @@ func test(tags []string, pkgs ...string) {
 	lazyRebuildAssets()
 
 	tags = append(tags, "purego")
-	args := []string{"test", "-short", "-timeout", timeout, "-tags", strings.Join(tags, " ")}
+	args := []string{"test", "-tags", strings.Join(tags, " ")}
+	if long {
+		timeout = longTimeout
+	} else {
+		args = append(args, "-short")
+	}
+	args = append(args, "-timeout", timeout)
 
 	if runtime.GOARCH == "amd64" {
 		switch runtime.GOOS {
@@ -871,28 +867,24 @@ func shouldRebuildAssets(target, srcdir string) bool {
 
 func proto() {
 	pv := protobufVersion()
-	dependencyRepos = append(dependencyRepos,
-		dependencyRepo{path: "protobuf", repo: "https://github.com/gogo/protobuf.git", commit: pv},
-	)
+	repo := "https://github.com/gogo/protobuf.git"
+	path := filepath.Join("repos", "protobuf")
 
 	runPrint(goCmd, "get", fmt.Sprintf("github.com/gogo/protobuf/protoc-gen-gogofast@%v", pv))
 	os.MkdirAll("repos", 0755)
-	for _, dep := range dependencyRepos {
-		path := filepath.Join("repos", dep.path)
-		if _, err := os.Stat(path); err != nil {
-			runPrintInDir("repos", "git", "clone", dep.repo, dep.path)
-		} else {
-			runPrintInDir(path, "git", "fetch")
-		}
-		runPrintInDir(path, "git", "checkout", dep.commit)
+
+	if _, err := os.Stat(path); err != nil {
+		runPrint("git", "clone", repo, path)
+	} else {
+		runPrintInDir(path, "git", "fetch")
 	}
+	runPrintInDir(path, "git", "checkout", pv)
+
 	runPrint(goCmd, "generate", "github.com/syncthing/syncthing/cmd/stdiscosrv")
 	runPrint(goCmd, "generate", "proto/generate.go")
 }
 
 func testmocks() {
-	runPrint(goCmd, "get", "golang.org/x/tools/cmd/goimports")
-	runPrint(goCmd, "get", "github.com/maxbrunsfeld/counterfeiter/v6")
 	args := []string{
 		"generate",
 		"github.com/syncthing/syncthing/lib/config",
@@ -1387,32 +1379,6 @@ func metalint() {
 func metalintShort() {
 	lazyRebuildAssets()
 	runPrint(goCmd, "test", "-short", "-run", "Metalint", "./meta")
-}
-
-func temporaryBuildDir() (string, error) {
-	// The base of our temp dir is "syncthing-xxxxxxxx" where the x:es
-	// are eight bytes from the sha256 of our working directory. We do
-	// this because we want a name in the global temp dir that doesn't
-	// conflict with someone else building syncthing on the same
-	// machine, yet is persistent between runs from the same source
-	// directory.
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	hash := sha256.Sum256([]byte(wd))
-	base := fmt.Sprintf("syncthing-%x", hash[:4])
-
-	// The temp dir is taken from $STTMPDIR if set, otherwise the system
-	// default (potentially infrluenced by $TMPDIR on unixes).
-	var tmpDir string
-	if t := os.Getenv("STTMPDIR"); t != "" {
-		tmpDir = t
-	} else {
-		tmpDir = os.TempDir()
-	}
-
-	return filepath.Join(tmpDir, base), nil
 }
 
 func (t target) BinaryName() string {

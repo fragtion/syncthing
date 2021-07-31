@@ -20,7 +20,7 @@ import (
 // do not put restrictions on downgrades (e.g. for repairs after a bugfix).
 const (
 	dbVersion             = 14
-	dbMigrationVersion    = 16
+	dbMigrationVersion    = 19
 	dbMinSyncthingVersion = "v1.9.0"
 )
 
@@ -101,6 +101,8 @@ func (db *schemaUpdater) updateSchema() error {
 		{13, 13, "v1.7.0", db.updateSchemaTo13},
 		{14, 14, "v1.9.0", db.updateSchemaTo14},
 		{14, 16, "v1.9.0", db.checkRepairMigration},
+		{14, 17, "v1.9.0", db.migration17},
+		{14, 19, "v1.9.0", db.dropIndexIDsMigration},
 	}
 
 	for _, m := range migrations {
@@ -781,6 +783,57 @@ func (db *schemaUpdater) checkRepairMigration(_ int) error {
 		}
 	}
 	return nil
+}
+
+// migration17 finds all files that were pulled as invalid from an invalid
+// global and make sure they get scanned/pulled again.
+func (db *schemaUpdater) migration17(prev int) error {
+	if prev < 16 {
+		// Issue was introduced in migration to 16
+		return nil
+	}
+	t, err := db.newReadOnlyTransaction()
+	if err != nil {
+		return err
+	}
+	defer t.close()
+
+	for _, folderStr := range db.ListFolders() {
+		folder := []byte(folderStr)
+		meta, err := db.loadMetadataTracker(folderStr)
+		if err != nil {
+			return err
+		}
+		batch := NewFileInfoBatch(func(fs []protocol.FileInfo) error {
+			return db.updateLocalFiles(folder, fs, meta)
+		})
+		var innerErr error
+		err = t.withHave(folder, protocol.LocalDeviceID[:], nil, false, func(fi protocol.FileIntf) bool {
+			if fi.IsInvalid() && fi.FileLocalFlags() == 0 {
+				f := fi.(protocol.FileInfo)
+				f.SetMustRescan()
+				f.Version = protocol.Vector{}
+				batch.Append(f)
+				innerErr = batch.FlushIfFull()
+				return innerErr == nil
+			}
+			return true
+		})
+		if innerErr != nil {
+			return innerErr
+		}
+		if err != nil {
+			return err
+		}
+		if err := batch.Flush(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *schemaUpdater) dropIndexIDsMigration(_ int) error {
+	return db.dropIndexIDs()
 }
 
 func (db *schemaUpdater) rewriteGlobals(t readWriteTransaction) error {

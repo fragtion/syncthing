@@ -32,7 +32,7 @@ import (
 	"unicode"
 
 	"github.com/julienschmidt/httprouter"
-	metrics "github.com/rcrowley/go-metrics"
+	"github.com/rcrowley/go-metrics"
 	"github.com/thejerf/suture/v4"
 	"github.com/vitrun/qart/qr"
 	"golang.org/x/text/runes"
@@ -162,7 +162,7 @@ func (s *service) getListener(guiCfg config.GUIConfiguration) (net.Listener, err
 	if err != nil {
 		return nil, err
 	}
-	tlsCfg := tlsutil.SecureDefault()
+	tlsCfg := tlsutil.SecureDefaultWithTLS12()
 	tlsCfg.Certificates = []tls.Certificate{cert}
 
 	if guiCfg.Network() == "unix" {
@@ -290,6 +290,10 @@ func (s *service) Serve(ctx context.Context) error {
 	restMux.HandlerFunc(http.MethodPost, "/rest/system/pause", s.makeDevicePauseHandler(true))   // [device]
 	restMux.HandlerFunc(http.MethodPost, "/rest/system/resume", s.makeDevicePauseHandler(false)) // [device]
 	restMux.HandlerFunc(http.MethodPost, "/rest/system/debug", s.postSystemDebug)                // [enable] [disable]
+
+	// The DELETE handlers
+	restMux.HandlerFunc(http.MethodDelete, "/rest/cluster/pending/devices", s.deletePendingDevices) // device
+	restMux.HandlerFunc(http.MethodDelete, "/rest/cluster/pending/folders", s.deletePendingFolders) // folder [device]
 
 	// Config endpoints
 
@@ -632,6 +636,21 @@ func (s *service) getPendingDevices(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, devices)
 }
 
+func (s *service) deletePendingDevices(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+
+	device := qs.Get("device")
+	deviceID, err := protocol.DeviceIDFromString(device)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := s.model.DismissPendingDevice(deviceID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
 func (s *service) getPendingFolders(w http.ResponseWriter, r *http.Request) {
 	qs := r.URL.Query()
 
@@ -648,6 +667,22 @@ func (s *service) getPendingFolders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sendJSON(w, folders)
+}
+
+func (s *service) deletePendingFolders(w http.ResponseWriter, r *http.Request) {
+	qs := r.URL.Query()
+
+	device := qs.Get("device")
+	deviceID, err := protocol.DeviceIDFromString(device)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	folderID := qs.Get("folder")
+
+	if err := s.model.DismissPendingFolder(deviceID, folderID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (s *service) restPing(w http.ResponseWriter, r *http.Request) {
@@ -915,11 +950,16 @@ func (s *service) getDBFile(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+	mtimeMapping, mtimeErr := s.model.GetMtimeMapping(folder, file)
 
 	sendJSON(w, map[string]interface{}{
 		"global":       jsonFileInfo(gf),
 		"local":        jsonFileInfo(lf),
 		"availability": av,
+		"mtime": map[string]interface{}{
+			"err":   mtimeErr,
+			"value": mtimeMapping,
+		},
 	})
 }
 
@@ -934,6 +974,8 @@ func (s *service) getDebugFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mtimeMapping, mtimeErr := s.model.GetMtimeMapping(folder, file)
+
 	lf, _ := snap.Get(protocol.LocalDeviceID, file)
 	gf, _ := snap.GetGlobal(file)
 	av := snap.Availability(file)
@@ -944,6 +986,10 @@ func (s *service) getDebugFile(w http.ResponseWriter, r *http.Request) {
 		"local":          jsonFileInfo(lf),
 		"availability":   av,
 		"globalVersions": vl.String(),
+		"mtime": map[string]interface{}{
+			"err":   mtimeErr,
+			"value": mtimeMapping,
+		},
 	})
 }
 
@@ -1012,16 +1058,16 @@ func (s *service) getSystemStatus(w http.ResponseWriter, r *http.Request) {
 	res["tilde"] = tilde
 	if s.cfg.Options().LocalAnnEnabled || s.cfg.Options().GlobalAnnEnabled {
 		res["discoveryEnabled"] = true
-		discoErrors := make(map[string]string)
-		discoMethods := 0
-		for disco, err := range s.discoverer.ChildErrors() {
-			discoMethods++
-			if err != nil {
-				discoErrors[disco] = err.Error()
+		discoStatus := s.discoverer.ChildErrors()
+		res["discoveryStatus"] = discoveryStatusMap(discoStatus)
+		res["discoveryMethods"] = len(discoStatus) // DEPRECATED: Redundant, only for backwards compatibility, should be removed.
+		discoErrors := make(map[string]*string, len(discoStatus))
+		for s, e := range discoStatus {
+			if e != nil {
+				discoErrors[s] = errorString(e)
 			}
 		}
-		res["discoveryMethods"] = discoMethods
-		res["discoveryErrors"] = discoErrors
+		res["discoveryErrors"] = discoErrors // DEPRECATED: Redundant, only for backwards compatibility, should be removed.
 	}
 
 	res["connectionServiceStatus"] = s.connectionsService.ListenerStatus()
@@ -1139,7 +1185,7 @@ func (s *service) getSupportBundle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Report Data as a JSON
-	if r, err := s.urService.ReportData(context.TODO()); err != nil {
+	if r, err := s.urService.ReportDataPreview(r.Context(), ur.Version); err != nil {
 		l.Warnln("Support bundle: failed to create usage-reporting.json.txt:", err)
 	} else {
 		if usageReportingData, err := json.MarshalIndent(r, "", "  "); err != nil {
@@ -1892,6 +1938,20 @@ func errorString(err error) *string {
 		return &msg
 	}
 	return nil
+}
+
+type discoveryStatusEntry struct {
+	Error *string `json:"error"`
+}
+
+func discoveryStatusMap(errs map[string]error) map[string]discoveryStatusEntry {
+	out := make(map[string]discoveryStatusEntry, len(errs))
+	for s, e := range errs {
+		out[s] = discoveryStatusEntry{
+			Error: errorString(e),
+		}
+	}
+	return out
 }
 
 // sanitizedHostname returns the given name in a suitable form for use as

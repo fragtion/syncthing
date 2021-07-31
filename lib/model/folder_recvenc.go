@@ -16,6 +16,7 @@ import (
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/util"
 	"github.com/syncthing/syncthing/lib/versioner"
 )
 
@@ -27,8 +28,10 @@ type receiveEncryptedFolder struct {
 	*sendReceiveFolder
 }
 
-func newReceiveEncryptedFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, ver versioner.Versioner, evLogger events.Logger, ioLimiter *byteSemaphore) service {
-	return &receiveEncryptedFolder{newSendReceiveFolder(model, fset, ignores, cfg, ver, evLogger, ioLimiter).(*sendReceiveFolder)}
+func newReceiveEncryptedFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, ver versioner.Versioner, evLogger events.Logger, ioLimiter *util.Semaphore) service {
+	f := &receiveEncryptedFolder{newSendReceiveFolder(model, fset, ignores, cfg, ver, evLogger, ioLimiter).(*sendReceiveFolder)}
+	f.localFlags = protocol.FlagLocalReceiveOnly // gets propagated to the scanner, and set on locally changed files
+	return f
 }
 
 func (f *receiveEncryptedFolder) Revert() {
@@ -41,7 +44,7 @@ func (f *receiveEncryptedFolder) revert() error {
 	f.setState(FolderScanning)
 	defer f.setState(FolderIdle)
 
-	batch := newFileInfoBatch(func(fs []protocol.FileInfo) error {
+	batch := db.NewFileInfoBatch(func(fs []protocol.FileInfo) error {
 		f.updateLocalsFromScanning(fs)
 		return nil
 	})
@@ -54,7 +57,7 @@ func (f *receiveEncryptedFolder) revert() error {
 	var iterErr error
 	var dirs []string
 	snap.WithHaveTruncated(protocol.LocalDeviceID, func(intf protocol.FileIntf) bool {
-		if iterErr = batch.flushIfFull(); iterErr != nil {
+		if iterErr = batch.FlushIfFull(); iterErr != nil {
 			return false
 		}
 
@@ -81,7 +84,7 @@ func (f *receiveEncryptedFolder) revert() error {
 		// item should still not be sent in index updates. However being
 		// deleted, it will not show up as an unexpected file in the UI
 		// anymore.
-		batch.append(fi)
+		batch.Append(fi)
 
 		return true
 	})
@@ -91,7 +94,7 @@ func (f *receiveEncryptedFolder) revert() error {
 	if iterErr != nil {
 		return iterErr
 	}
-	return batch.flush()
+	return batch.Flush()
 }
 
 func (f *receiveEncryptedFolder) revertHandleDirs(dirs []string, snap *db.Snapshot) {
@@ -108,5 +111,6 @@ func (f *receiveEncryptedFolder) revertHandleDirs(dirs []string, snap *db.Snapsh
 		if err := f.deleteDirOnDisk(dir, snap, scanChan); err != nil {
 			f.newScanError(dir, fmt.Errorf("deleting unexpected dir: %w", err))
 		}
+		scanChan <- dir
 	}
 }
