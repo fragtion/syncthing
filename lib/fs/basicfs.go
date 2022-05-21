@@ -23,17 +23,17 @@ var (
 	errInvalidFilenameWindowsSpacePeriod  = errors.New("name is invalid, must not end in space or period on Windows")
 	errInvalidFilenameWindowsReservedName = errors.New("name is invalid, contains Windows reserved name (NUL, COM1, etc.)")
 	errInvalidFilenameWindowsReservedChar = errors.New("name is invalid, contains Windows reserved character (?, *, etc.)")
-	errNotRelative                        = errors.New("not a relative path")
 )
 
 type OptionJunctionsAsDirs struct{}
 
-func (o *OptionJunctionsAsDirs) apply(fs Filesystem) {
+func (o *OptionJunctionsAsDirs) apply(fs Filesystem) Filesystem {
 	if basic, ok := fs.(*BasicFilesystem); !ok {
 		l.Warnln("WithJunctionsAsDirs must only be used with FilesystemTypeBasic")
 	} else {
 		basic.junctionsAsDirs = true
 	}
+	return fs
 }
 
 func (o *OptionJunctionsAsDirs) String() string {

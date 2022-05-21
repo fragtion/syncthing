@@ -50,6 +50,7 @@ type service interface {
 	Override()
 	Revert()
 	DelayScan(d time.Duration)
+	ScheduleScan()
 	SchedulePull()                                    // something relevant changed, we should try a pull
 	Jobs(page, perpage int) ([]string, []string, int) // In progress, Queued, skipped
 	Scan(subs []string) error
@@ -71,7 +72,7 @@ type Model interface {
 
 	connections.Model
 
-	ResetFolder(folder string)
+	ResetFolder(folder string) error
 	DelayScan(folder string, next time.Duration)
 	ScanFolder(folder string) error
 	ScanFolders() map[string]error
@@ -160,12 +161,14 @@ type model struct {
 	closed              map[protocol.DeviceID]chan struct{}
 	helloMessages       map[protocol.DeviceID]protocol.Hello
 	deviceDownloads     map[protocol.DeviceID]*deviceDownloadState
-	remotePausedFolders map[protocol.DeviceID]map[string]struct{} // deviceID -> folders
+	remoteFolderStates  map[protocol.DeviceID]map[string]remoteFolderState // deviceID -> folders
 	indexHandlers       map[protocol.DeviceID]*indexHandlerRegistry
 
 	// for testing only
 	foldersRunning int32
 }
+
+var _ config.Verifier = &model{}
 
 type folderFactory func(*model, *db.FileSet, *ignore.Matcher, config.FolderConfiguration, versioner.Versioner, events.Logger, *util.Semaphore) service
 
@@ -174,15 +177,13 @@ var (
 )
 
 var (
-	errDeviceUnknown     = errors.New("unknown device")
-	errDevicePaused      = errors.New("device is paused")
-	errDeviceIgnored     = errors.New("device is ignored")
-	errDeviceRemoved     = errors.New("device has been removed")
-	ErrFolderPaused      = errors.New("folder is paused")
-	ErrFolderNotRunning  = errors.New("folder is not running")
-	ErrFolderMissing     = errors.New("no such folder")
-	errNetworkNotAllowed = errors.New("network not allowed")
-	errNoVersioner       = errors.New("folder has no versioner")
+	errDeviceUnknown    = errors.New("unknown device")
+	errDevicePaused     = errors.New("device is paused")
+	errDeviceRemoved    = errors.New("device has been removed")
+	ErrFolderPaused     = errors.New("folder is paused")
+	ErrFolderNotRunning = errors.New("folder is not running")
+	ErrFolderMissing    = errors.New("no such folder")
+	errNoVersioner      = errors.New("folder has no versioner")
 	// errors about why a connection is closed
 	errReplacingConnection                = errors.New("replacing connection")
 	errStopped                            = errors.New("Syncthing is being stopped")
@@ -245,7 +246,7 @@ func NewModel(cfg config.Wrapper, id protocol.DeviceID, clientName, clientVersio
 		closed:              make(map[protocol.DeviceID]chan struct{}),
 		helloMessages:       make(map[protocol.DeviceID]protocol.Hello),
 		deviceDownloads:     make(map[protocol.DeviceID]*deviceDownloadState),
-		remotePausedFolders: make(map[protocol.DeviceID]map[string]struct{}),
+		remoteFolderStates:  make(map[protocol.DeviceID]map[string]remoteFolderState),
 		indexHandlers:       make(map[protocol.DeviceID]*indexHandlerRegistry),
 	}
 	for devID := range cfg.Devices() {
@@ -331,7 +332,7 @@ func (m *model) StartDeadlockDetector(timeout time.Duration) {
 
 // Need to hold lock on m.fmut when calling this.
 func (m *model) addAndStartFolderLocked(cfg config.FolderConfiguration, fset *db.FileSet, cacheIgnoredFiles bool) {
-	ignores := ignore.New(cfg.Filesystem(), ignore.WithCache(cacheIgnoredFiles))
+	ignores := ignore.New(cfg.Filesystem(nil), ignore.WithCache(cacheIgnoredFiles))
 	if cfg.Type != config.FolderTypeReceiveEncrypted {
 		if err := ignores.Load(".stignore"); err != nil && !fs.IsNotExist(err) {
 			l.Warnln("Loading ignores:", err)
@@ -395,7 +396,7 @@ func (m *model) addAndStartFolderLockedWithIgnores(cfg config.FolderConfiguratio
 	}
 
 	// These are our metadata files, and they should always be hidden.
-	ffs := cfg.Filesystem()
+	ffs := cfg.Filesystem(nil)
 	_ = ffs.Hide(config.DefaultMarkerName)
 	_ = ffs.Hide(".stversions")
 	_ = ffs.Hide(".stignore")
@@ -427,7 +428,7 @@ func (m *model) warnAboutOverwritingProtectedFiles(cfg config.FolderConfiguratio
 	}
 
 	// This is a bit of a hack.
-	ffs := cfg.Filesystem()
+	ffs := cfg.Filesystem(nil)
 	if ffs.Type() != fs.FilesystemTypeBasic {
 		return
 	}
@@ -477,7 +478,7 @@ func (m *model) removeFolder(cfg config.FolderConfiguration) {
 	if isPathUnique {
 		// Remove (if empty and removable) or move away (if non-empty or
 		// otherwise not removable) Syncthing-specific marker files.
-		fs := cfg.Filesystem()
+		fs := cfg.Filesystem(nil)
 		if err := fs.Remove(config.DefaultMarkerName); err != nil {
 			moved := config.DefaultMarkerName + time.Now().Format(".removed-20060102-150405")
 			_ = fs.Rename(config.DefaultMarkerName, moved)
@@ -505,6 +506,8 @@ func (m *model) cleanupFolderLocked(cfg config.FolderConfiguration) {
 	delete(m.folderRunners, cfg.ID)
 	delete(m.folderRunnerToken, cfg.ID)
 	delete(m.folderVersioners, cfg.ID)
+	delete(m.folderEncryptionPasswordTokens, cfg.ID)
+	delete(m.folderEncryptionFailures, cfg.ID)
 }
 
 func (m *model) restartFolder(from, to config.FolderConfiguration, cacheIgnoredFiles bool) error {
@@ -548,7 +551,7 @@ func (m *model) restartFolder(from, to config.FolderConfiguration, cacheIgnoredF
 			// locking, but it's unsafe to create fset:s concurrently so
 			// that's the price we pay.
 			var err error
-			fset, err = db.NewFileSet(folder, to.Filesystem(), m.db)
+			fset, err = db.NewFileSet(folder, m.db)
 			if err != nil {
 				return fmt.Errorf("restarting %v: %w", to.Description(), err)
 			}
@@ -581,7 +584,7 @@ func (m *model) restartFolder(from, to config.FolderConfiguration, cacheIgnoredF
 func (m *model) newFolder(cfg config.FolderConfiguration, cacheIgnoredFiles bool) error {
 	// Creating the fileset can take a long time (metadata calculation) so
 	// we do it outside of the lock.
-	fset, err := db.NewFileSet(cfg.ID, cfg.Filesystem(), m.db)
+	fset, err := db.NewFileSet(cfg.ID, m.db)
 	if err != nil {
 		return fmt.Errorf("adding %v: %w", cfg.Description(), err)
 	}
@@ -701,26 +704,12 @@ func (m *model) UsageReportingStats(report *contract.Report, version int, previe
 
 type ConnectionInfo struct {
 	protocol.Statistics
-	Connected     bool
-	Paused        bool
-	Address       string
-	ClientVersion string
-	Type          string
-	Crypto        string
-}
-
-func (info ConnectionInfo) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]interface{}{
-		"at":            info.At,
-		"inBytesTotal":  info.InBytesTotal,
-		"outBytesTotal": info.OutBytesTotal,
-		"connected":     info.Connected,
-		"paused":        info.Paused,
-		"address":       info.Address,
-		"clientVersion": info.ClientVersion,
-		"type":          info.Type,
-		"crypto":        info.Crypto,
-	})
+	Connected     bool   `json:"connected"`
+	Paused        bool   `json:"paused"`
+	Address       string `json:"address"`
+	ClientVersion string `json:"clientVersion"`
+	Type          string `json:"type"`
+	Crypto        string `json:"crypto"`
 }
 
 // NumConnections returns the current number of active connected devices.
@@ -764,12 +753,10 @@ func (m *model) ConnectionStats() map[string]interface{} {
 	res["connections"] = conns
 
 	in, out := protocol.TotalInOut()
-	res["total"] = ConnectionInfo{
-		Statistics: protocol.Statistics{
-			At:            time.Now().Truncate(time.Second),
-			InBytesTotal:  in,
-			OutBytesTotal: out,
-		},
+	res["total"] = map[string]interface{}{
+		"at":            time.Now().Truncate(time.Second),
+		"inBytesTotal":  in,
+		"outBytesTotal": out,
 	}
 
 	return res
@@ -813,9 +800,10 @@ type FolderCompletion struct {
 	NeedItems     int
 	NeedDeletes   int
 	Sequence      int64
+	RemoteState   remoteFolderState
 }
 
-func newFolderCompletion(global, need db.Counts, sequence int64) FolderCompletion {
+func newFolderCompletion(global, need db.Counts, sequence int64, state remoteFolderState) FolderCompletion {
 	comp := FolderCompletion{
 		GlobalBytes: global.Bytes,
 		NeedBytes:   need.Bytes,
@@ -823,6 +811,7 @@ func newFolderCompletion(global, need db.Counts, sequence int64) FolderCompletio
 		NeedItems:   need.Files + need.Directories + need.Symlinks,
 		NeedDeletes: need.Deleted,
 		Sequence:    sequence,
+		RemoteState: state,
 	}
 	comp.setComplectionPct()
 	return comp
@@ -854,7 +843,7 @@ func (comp *FolderCompletion) setComplectionPct() {
 	}
 }
 
-// Map returns the members as a map, e.g. used in api to serialize as Json.
+// Map returns the members as a map, e.g. used in api to serialize as JSON.
 func (comp FolderCompletion) Map() map[string]interface{} {
 	return map[string]interface{}{
 		"completion":  comp.CompletionPct,
@@ -864,6 +853,7 @@ func (comp FolderCompletion) Map() map[string]interface{} {
 		"needItems":   comp.NeedItems,
 		"needDeletes": comp.NeedDeletes,
 		"sequence":    comp.Sequence,
+		"remoteState": comp.RemoteState,
 	}
 }
 
@@ -914,6 +904,7 @@ func (m *model) folderCompletion(device protocol.DeviceID, folder string) (Folde
 	defer snap.Release()
 
 	m.pmut.RLock()
+	state := m.remoteFolderStates[device][folder]
 	downloaded := m.deviceDownloads[device].BytesDownloaded(folder)
 	m.pmut.RUnlock()
 
@@ -924,7 +915,7 @@ func (m *model) folderCompletion(device protocol.DeviceID, folder string) (Folde
 		need.Bytes = 0
 	}
 
-	comp := newFolderCompletion(snap.GlobalSize(), need, snap.Sequence(device))
+	comp := newFolderCompletion(snap.GlobalSize(), need, snap.Sequence(device), state)
 
 	l.Debugf("%v Completion(%s, %q): %v", m, device, folder, comp.Map())
 	return comp, nil
@@ -1017,9 +1008,8 @@ func (m *model) NeedFolderFiles(folder string, page, perpage int) ([]db.FileInfo
 	return progress, queued, rest, nil
 }
 
-// RemoteNeedFolderFiles returns paginated list of currently needed files in
-// progress, queued, and to be queued on next puller iteration, as well as the
-// total number of files currently needed.
+// RemoteNeedFolderFiles returns paginated list of currently needed files for a
+// remote device to become synced with a folder.
 func (m *model) RemoteNeedFolderFiles(folder string, device protocol.DeviceID, page, perpage int) ([]db.FileInfoTruncated, error) {
 	m.fmut.RLock()
 	rf, ok := m.folderFiles[folder]
@@ -1050,7 +1040,6 @@ func (m *model) RemoteNeedFolderFiles(folder string, device protocol.DeviceID, p
 func (m *model) LocalChangedFolderFiles(folder string, page, perpage int) ([]db.FileInfoTruncated, error) {
 	m.fmut.RLock()
 	rf, ok := m.folderFiles[folder]
-	cfg := m.folderCfgs[folder]
 	m.fmut.RUnlock()
 
 	if !ok {
@@ -1068,11 +1057,10 @@ func (m *model) LocalChangedFolderFiles(folder string, page, perpage int) ([]db.
 	}
 
 	p := newPager(page, perpage)
-	recvEnc := cfg.Type == config.FolderTypeReceiveEncrypted
 	files := make([]db.FileInfoTruncated, 0, perpage)
 
 	snap.WithHaveTruncated(protocol.LocalDeviceID, func(f protocol.FileIntf) bool {
-		if !f.IsReceiveOnlyChanged() || (recvEnc && f.IsDeleted()) {
+		if !f.IsReceiveOnlyChanged() {
 			return true
 		}
 		if p.skip() {
@@ -1159,6 +1147,10 @@ type clusterConfigDeviceInfo struct {
 	local, remote protocol.Device
 }
 
+type ClusterConfigReceivedEventData struct {
+	Device protocol.DeviceID `json:"device"`
+}
+
 func (m *model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterConfig) error {
 	// Check the peer device's announced folders against our own. Emits events
 	// for folders that we don't expect (unknown or not shared).
@@ -1237,14 +1229,18 @@ func (m *model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterCon
 		w.Wait()
 	}
 
-	tempIndexFolders, paused, err := m.ccHandleFolders(cm.Folders, deviceCfg, ccDeviceInfos, indexHandlerRegistry)
+	tempIndexFolders, states, err := m.ccHandleFolders(cm.Folders, deviceCfg, ccDeviceInfos, indexHandlerRegistry)
 	if err != nil {
 		return err
 	}
 
 	m.pmut.Lock()
-	m.remotePausedFolders[deviceID] = paused
+	m.remoteFolderStates[deviceID] = states
 	m.pmut.Unlock()
+
+	m.evLogger.Log(events.ClusterConfigReceived, ClusterConfigReceivedEventData{
+		Device: deviceID,
+	})
 
 	if len(tempIndexFolders) > 0 {
 		m.pmut.RLock()
@@ -1278,11 +1274,10 @@ func (m *model) ClusterConfig(deviceID protocol.DeviceID, cm protocol.ClusterCon
 	return nil
 }
 
-func (m *model) ccHandleFolders(folders []protocol.Folder, deviceCfg config.DeviceConfiguration, ccDeviceInfos map[string]*clusterConfigDeviceInfo, indexHandlers *indexHandlerRegistry) ([]string, map[string]struct{}, error) {
+func (m *model) ccHandleFolders(folders []protocol.Folder, deviceCfg config.DeviceConfiguration, ccDeviceInfos map[string]*clusterConfigDeviceInfo, indexHandlers *indexHandlerRegistry) ([]string, map[string]remoteFolderState, error) {
 	var folderDevice config.FolderDeviceConfiguration
 	tempIndexFolders := make([]string, 0, len(folders))
-	paused := make(map[string]struct{}, len(folders))
-	seenFolders := make(map[string]struct{}, len(folders))
+	seenFolders := make(map[string]remoteFolderState, len(folders))
 	updatedPending := make([]updatedPendingFolder, 0, len(folders))
 	deviceID := deviceCfg.DeviceID
 	expiredPending, err := m.db.PendingFoldersForDevice(deviceID)
@@ -1291,7 +1286,7 @@ func (m *model) ccHandleFolders(folders []protocol.Folder, deviceCfg config.Devi
 	}
 	of := db.ObservedFolder{Time: time.Now().Truncate(time.Second)}
 	for _, folder := range folders {
-		seenFolders[folder.ID] = struct{}{}
+		seenFolders[folder.ID] = remoteFolderValid
 
 		cfg, ok := m.cfg.Folder(folder.ID)
 		if ok {
@@ -1332,7 +1327,7 @@ func (m *model) ccHandleFolders(folders []protocol.Folder, deviceCfg config.Devi
 
 		if folder.Paused {
 			indexHandlers.Remove(folder.ID)
-			paused[cfg.ID] = struct{}{}
+			seenFolders[cfg.ID] = remoteFolderPaused
 			continue
 		}
 
@@ -1361,7 +1356,7 @@ func (m *model) ccHandleFolders(folders []protocol.Folder, deviceCfg config.Devi
 				m.evLogger.Log(events.Failure, err.Error())
 				l.Warnln(msg)
 			}
-			return tempIndexFolders, paused, err
+			return tempIndexFolders, seenFolders, err
 		}
 		m.fmut.Lock()
 		if devErrs, ok := m.folderEncryptionFailures[folder.ID]; ok {
@@ -1383,6 +1378,15 @@ func (m *model) ccHandleFolders(folders []protocol.Folder, deviceCfg config.Devi
 	}
 
 	indexHandlers.RemoveAllExcept(seenFolders)
+
+	// Explicitly mark folders we offer, but the remote has not accepted
+	for folderID, cfg := range m.cfg.Folders() {
+		if _, seen := seenFolders[folderID]; !seen && cfg.SharedWith(deviceID) {
+			l.Debugf("Remote device %v has not accepted sharing folder %s", deviceID.Short(), cfg.Description())
+			seenFolders[folderID] = remoteFolderNotSharing
+		}
+	}
+
 	expiredPendingList := make([]map[string]string, 0, len(expiredPending))
 	for folder := range expiredPending {
 		if err = m.db.RemovePendingFolderForDevice(folder, deviceID); err != nil {
@@ -1403,7 +1407,7 @@ func (m *model) ccHandleFolders(folders []protocol.Folder, deviceCfg config.Devi
 		})
 	}
 
-	return tempIndexFolders, paused, nil
+	return tempIndexFolders, seenFolders, nil
 }
 
 func (m *model) ccCheckEncryption(fcfg config.FolderConfiguration, folderDevice config.FolderDeviceConfiguration, ccDeviceInfos *clusterConfigDeviceInfo, deviceUntrusted bool) error {
@@ -1664,6 +1668,11 @@ func (m *model) handleAutoAccepts(deviceID protocol.DeviceID, folder protocol.Fo
 
 			if len(ccDeviceInfos.remote.EncryptionPasswordToken) > 0 || len(ccDeviceInfos.local.EncryptionPasswordToken) > 0 {
 				fcfg.Type = config.FolderTypeReceiveEncrypted
+			} else {
+				ignores := m.cfg.DefaultIgnores()
+				if err := m.setIgnores(fcfg, ignores.Lines); err != nil {
+					l.Warnf("Failed to apply default ignores to auto-accepted folder %s at path %s: %v", folder.Description(), fcfg.Path, err)
+				}
 			}
 
 			l.Infof("Auto-accepted %s folder %s at path %s", deviceID, folder.Description(), fcfg.Path)
@@ -1737,7 +1746,7 @@ func (m *model) Closed(device protocol.DeviceID, err error) {
 	delete(m.connRequestLimiters, device)
 	delete(m.helloMessages, device)
 	delete(m.deviceDownloads, device)
-	delete(m.remotePausedFolders, device)
+	delete(m.remoteFolderStates, device)
 	closed := m.closed[device]
 	delete(m.closed, device)
 	delete(m.indexHandlers, device)
@@ -1850,7 +1859,7 @@ func (m *model) Request(deviceID protocol.DeviceID, folder, name string, blockNo
 	// Grab the FS after limiting, as it causes I/O and we want to minimize
 	// the race time between the symlink check and the read.
 
-	folderFs := folderCfg.Filesystem()
+	folderFs := folderCfg.Filesystem(nil)
 
 	if err := osutil.TraversesSymlink(folderFs, filepath.Dir(name)); err != nil {
 		l.Debugf("%v REQ(in) traversal check: %s - %s: %q / %q o=%d s=%d", m, err, deviceID, folder, name, offset, size)
@@ -2011,11 +2020,12 @@ func (m *model) CurrentGlobalFile(folder string, file string) (protocol.FileInfo
 func (m *model) GetMtimeMapping(folder string, file string) (fs.MtimeMapping, error) {
 	m.fmut.RLock()
 	ffs, ok := m.folderFiles[folder]
+	fcfg := m.folderCfgs[folder]
 	m.fmut.RUnlock()
 	if !ok {
 		return fs.MtimeMapping{}, ErrFolderMissing
 	}
-	return fs.GetMtimeMapping(ffs.MtimeFS(), file)
+	return fs.GetMtimeMapping(fcfg.Filesystem(ffs), file)
 }
 
 // Connection returns the current connection for device, and a boolean whether a connection was found.
@@ -2048,13 +2058,8 @@ func (m *model) LoadIgnores(folder string) ([]string, []string, error) {
 		return nil, nil, nil
 	}
 
-	// On creation a new folder with ignore patterns validly has no marker yet.
-	if err := cfg.CheckPath(); err != nil && err != config.ErrMarkerMissing {
-		return nil, nil, err
-	}
-
 	if !ignoresOk {
-		ignores = ignore.New(cfg.Filesystem())
+		ignores = ignore.New(cfg.Filesystem(nil))
 	}
 
 	err := ignores.Load(".stignore")
@@ -2094,7 +2099,10 @@ func (m *model) SetIgnores(folder string, content []string) error {
 	if !ok {
 		return fmt.Errorf("folder %s does not exist", cfg.Description())
 	}
+	return m.setIgnores(cfg, content)
+}
 
+func (m *model) setIgnores(cfg config.FolderConfiguration, content []string) error {
 	err := cfg.CheckPath()
 	if err == config.ErrPathMissing {
 		if err = cfg.CreateRoot(); err != nil {
@@ -2106,16 +2114,16 @@ func (m *model) SetIgnores(folder string, content []string) error {
 		return err
 	}
 
-	if err := ignore.WriteIgnores(cfg.Filesystem(), ".stignore", content); err != nil {
+	if err := ignore.WriteIgnores(cfg.Filesystem(nil), ".stignore", content); err != nil {
 		l.Warnln("Saving .stignore:", err)
 		return err
 	}
 
 	m.fmut.RLock()
-	runner, ok := m.folderRunners[folder]
+	runner, ok := m.folderRunners[cfg.ID]
 	m.fmut.RUnlock()
 	if ok {
-		return runner.Scan(nil)
+		runner.ScheduleScan()
 	}
 	return nil
 }
@@ -2124,12 +2132,7 @@ func (m *model) SetIgnores(folder string, content []string) error {
 // This allows us to extract some information from the Hello message
 // and add it to a list of known devices ahead of any checks.
 func (m *model) OnHello(remoteID protocol.DeviceID, addr net.Addr, hello protocol.Hello) error {
-	if m.cfg.IgnoredDevice(remoteID) {
-		return errDeviceIgnored
-	}
-
-	cfg, ok := m.cfg.Device(remoteID)
-	if !ok {
+	if _, ok := m.cfg.Device(remoteID); !ok {
 		if err := m.db.AddOrUpdatePendingDevice(remoteID, hello.DeviceName, addr.String()); err != nil {
 			l.Warnf("Failed to persist pending device entry to database: %v", err)
 		}
@@ -2148,21 +2151,6 @@ func (m *model) OnHello(remoteID protocol.DeviceID, addr net.Addr, hello protoco
 		})
 		return errDeviceUnknown
 	}
-
-	if cfg.Paused {
-		return errDevicePaused
-	}
-
-	if len(cfg.AllowedNetworks) > 0 && !connections.IsAllowedNetwork(addr.String(), cfg.AllowedNetworks) {
-		// The connection is not from an allowed network.
-		return errNetworkNotAllowed
-	}
-
-	if max := m.cfg.Options().ConnectionLimitMax; max > 0 && m.NumConnections() >= max {
-		// We're not allowed to accept any more connections.
-		return errConnLimitReached
-	}
-
 	return nil
 }
 
@@ -2401,7 +2389,7 @@ func (m *model) numHashers(folder string) int {
 		return folderCfg.Hashers
 	}
 
-	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" || runtime.GOOS == "android" {
 		// Interactive operating systems; don't load the system too heavily by
 		// default.
 		return 1
@@ -2730,10 +2718,10 @@ func (m *model) availabilityInSnapshot(cfg config.FolderConfiguration, snap *db.
 func (m *model) availabilityInSnapshotPRlocked(cfg config.FolderConfiguration, snap *db.Snapshot, file protocol.FileInfo, block protocol.BlockInfo) []Availability {
 	var availabilities []Availability
 	for _, device := range snap.Availability(file.Name) {
-		if _, ok := m.remotePausedFolders[device]; !ok {
+		if _, ok := m.remoteFolderStates[device]; !ok {
 			continue
 		}
-		if _, ok := m.remotePausedFolders[device][cfg.ID]; ok {
+		if state := m.remoteFolderStates[device][cfg.ID]; state != remoteFolderValid {
 			continue
 		}
 		_, ok := m.conn[device]
@@ -2762,9 +2750,16 @@ func (m *model) BringToFront(folder, file string) {
 	}
 }
 
-func (m *model) ResetFolder(folder string) {
-	l.Infof("Cleaning data for folder %q", folder)
+func (m *model) ResetFolder(folder string) error {
+	m.fmut.RLock()
+	defer m.fmut.RUnlock()
+	_, ok := m.folderRunners[folder]
+	if ok {
+		return errors.New("folder must be paused when resetting")
+	}
+	l.Infof("Cleaning metadata for reset folder %q", folder)
 	db.DropFolder(m.db, folder)
+	return nil
 }
 
 func (m *model) String() string {
@@ -3233,7 +3228,7 @@ type storedEncryptionToken struct {
 }
 
 func readEncryptionToken(cfg config.FolderConfiguration) ([]byte, error) {
-	fd, err := cfg.Filesystem().Open(encryptionTokenPath(cfg))
+	fd, err := cfg.Filesystem(nil).Open(encryptionTokenPath(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -3247,7 +3242,7 @@ func readEncryptionToken(cfg config.FolderConfiguration) ([]byte, error) {
 
 func writeEncryptionToken(token []byte, cfg config.FolderConfiguration) error {
 	tokenName := encryptionTokenPath(cfg)
-	fd, err := cfg.Filesystem().OpenFile(tokenName, fs.OptReadWrite|fs.OptCreate, 0666)
+	fd, err := cfg.Filesystem(nil).OpenFile(tokenName, fs.OptReadWrite|fs.OptCreate, 0666)
 	if err != nil {
 		return err
 	}

@@ -7,7 +7,6 @@
 package osutil_test
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,15 +17,11 @@ import (
 )
 
 func TestTraversesSymlink(t *testing.T) {
-	tmpDir, err := ioutil.TempDir(".", ".test-TraversesSymlink-")
-	if err != nil {
-		panic("Failed to create temporary testing dir")
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	testFs := fs.NewFilesystem(fs.FilesystemTypeBasic, tmpDir)
 	testFs.MkdirAll("a/b/c", 0755)
-	if err = fs.DebugSymlinkForTestsOnly(testFs, testFs, filepath.Join("a", "b"), filepath.Join("a", "l")); err != nil {
+	if err := fs.DebugSymlinkForTestsOnly(testFs, testFs, filepath.Join("a", "b"), filepath.Join("a", "l")); err != nil {
 		if runtime.GOOS == "windows" {
 			t.Skip("Symlinks aren't working")
 		}
@@ -71,15 +66,11 @@ func TestTraversesSymlink(t *testing.T) {
 }
 
 func TestIssue4875(t *testing.T) {
-	tmpDir, err := ioutil.TempDir("", ".test-Issue4875-")
-	if err != nil {
-		panic("Failed to create temporary testing dir")
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	testFs := fs.NewFilesystem(fs.FilesystemTypeBasic, tmpDir)
 	testFs.MkdirAll(filepath.Join("a", "b", "c"), 0755)
-	if err = fs.DebugSymlinkForTestsOnly(testFs, testFs, filepath.Join("a", "b"), filepath.Join("a", "l")); err != nil {
+	if err := fs.DebugSymlinkForTestsOnly(testFs, testFs, filepath.Join("a", "b"), filepath.Join("a", "l")); err != nil {
 		if runtime.GOOS == "windows" {
 			t.Skip("Symlinks aren't working")
 		}

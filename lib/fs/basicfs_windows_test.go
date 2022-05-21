@@ -4,6 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+//go:build windows
 // +build windows
 
 package fs
@@ -48,7 +49,6 @@ func TestResolveWindows83(t *testing.T) {
 		dir = fs.resolveWin83(dir)
 		fs = newBasicFilesystem(dir)
 	}
-	defer os.RemoveAll(dir)
 
 	shortAbs, _ := fs.rooted("LFDATA~1")
 	long := "LFDataTool"
@@ -79,7 +79,6 @@ func TestIsWindows83(t *testing.T) {
 		dir = fs.resolveWin83(dir)
 		fs = newBasicFilesystem(dir)
 	}
-	defer os.RemoveAll(dir)
 
 	tempTop, _ := fs.rooted(TempName("baz"))
 	tempBelow, _ := fs.rooted(filepath.Join("foo", "bar", TempName("baz")))
