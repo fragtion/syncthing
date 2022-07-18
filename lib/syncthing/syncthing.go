@@ -26,6 +26,7 @@ import (
 	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/connections"
+	"github.com/syncthing/syncthing/lib/connections/registry"
 	"github.com/syncthing/syncthing/lib/db"
 	"github.com/syncthing/syncthing/lib/db/backend"
 	"github.com/syncthing/syncthing/lib/discover"
@@ -206,7 +207,7 @@ func (a *App) startup() error {
 	folders := a.cfg.Folders()
 	for _, folder := range a.ll.ListFolders() {
 		if _, ok := folders[folder]; !ok {
-			l.Infof("Cleaning data for dropped folder %q", folder)
+			l.Infof("Cleaning metadata for dropped folder %q", folder)
 			db.DropFolder(a.ll, folder)
 		}
 	}
@@ -276,8 +277,9 @@ func (a *App) startup() error {
 	// Create a wrapper that is then wired after they are both setup.
 	addrLister := &lateAddressLister{}
 
-	discoveryManager := discover.NewManager(a.myID, a.cfg, a.cert, a.evLogger, addrLister)
-	connectionsService := connections.NewService(a.cfg, a.myID, m, tlsCfg, discoveryManager, bepProtocolName, tlsDefaultCommonName, a.evLogger)
+	connRegistry := registry.New()
+	discoveryManager := discover.NewManager(a.myID, a.cfg, a.cert, a.evLogger, addrLister, connRegistry)
+	connectionsService := connections.NewService(a.cfg, a.myID, m, tlsCfg, discoveryManager, bepProtocolName, tlsDefaultCommonName, a.evLogger, connRegistry)
 
 	addrLister.AddressLister = connectionsService
 
