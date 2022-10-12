@@ -11,13 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	metrics "github.com/rcrowley/go-metrics"
+	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
@@ -40,8 +40,7 @@ type Config struct {
 	// The Filesystem provides an abstraction on top of the actual filesystem.
 	Filesystem fs.Filesystem
 	// If IgnorePerms is true, changes to permission bits will not be
-	// detected. Scanned files will get zero permission bits and the
-	// NoPermissionBits flag set.
+	// detected.
 	IgnorePerms bool
 	// When AutoNormalize is set, file names that are in UTF8 but incorrect
 	// normalization form will be corrected.
@@ -59,11 +58,23 @@ type Config struct {
 	ModTimeWindow time.Duration
 	// Event logger to which the scan progress events are sent
 	EventLogger events.Logger
+	// If ScanOwnership is true, we pick up ownership information on files while scanning.
+	ScanOwnership bool
+	// If ScanXattrs is true, we pick up extended attributes on files while scanning.
+	ScanXattrs bool
+	// Filter for extended attributes
+	XattrFilter XattrFilter
 }
 
 type CurrentFiler interface {
 	// CurrentFile returns the file as seen at last scan.
 	CurrentFile(name string) (protocol.FileInfo, bool)
+}
+
+type XattrFilter interface {
+	Permit(string) bool
+	GetMaxSingleEntrySize() int
+	GetMaxTotalSize() int
 }
 
 type ScanResult struct {
@@ -381,13 +392,23 @@ func (w *walker) walkRegular(ctx context.Context, relPath string, info fs.FileIn
 		}
 	}
 
-	f, _ := CreateFileInfo(info, relPath, nil)
+	f, err := CreateFileInfo(info, relPath, w.Filesystem, w.ScanOwnership, w.ScanXattrs, w.XattrFilter)
+	if err != nil {
+		return err
+	}
 	f = w.updateFileInfo(f, curFile)
 	f.NoPermissions = w.IgnorePerms
 	f.RawBlockSize = blockSize
 
 	if hasCurFile {
-		if curFile.IsEquivalentOptional(f, w.ModTimeWindow, w.IgnorePerms, true, w.LocalFlags) {
+		if curFile.IsEquivalentOptional(f, protocol.FileInfoComparison{
+			ModTimeWindow:   w.ModTimeWindow,
+			IgnorePerms:     w.IgnorePerms,
+			IgnoreBlocks:    true,
+			IgnoreFlags:     w.LocalFlags,
+			IgnoreOwnership: !w.ScanOwnership,
+			IgnoreXattrs:    !w.ScanXattrs,
+		}) {
 			l.Debugln(w, "unchanged:", curFile, info.ModTime().Unix(), info.Mode()&fs.ModePerm)
 			return nil
 		}
@@ -416,12 +437,22 @@ func (w *walker) walkRegular(ctx context.Context, relPath string, info fs.FileIn
 func (w *walker) walkDir(ctx context.Context, relPath string, info fs.FileInfo, finishedChan chan<- ScanResult) error {
 	curFile, hasCurFile := w.CurrentFiler.CurrentFile(relPath)
 
-	f, _ := CreateFileInfo(info, relPath, nil)
+	f, err := CreateFileInfo(info, relPath, w.Filesystem, w.ScanOwnership, w.ScanXattrs, w.XattrFilter)
+	if err != nil {
+		return err
+	}
 	f = w.updateFileInfo(f, curFile)
 	f.NoPermissions = w.IgnorePerms
 
 	if hasCurFile {
-		if curFile.IsEquivalentOptional(f, w.ModTimeWindow, w.IgnorePerms, true, w.LocalFlags) {
+		if curFile.IsEquivalentOptional(f, protocol.FileInfoComparison{
+			ModTimeWindow:   w.ModTimeWindow,
+			IgnorePerms:     w.IgnorePerms,
+			IgnoreBlocks:    true,
+			IgnoreFlags:     w.LocalFlags,
+			IgnoreOwnership: !w.ScanOwnership,
+			IgnoreXattrs:    !w.ScanXattrs,
+		}) {
 			l.Debugln(w, "unchanged:", curFile, info.ModTime().Unix(), info.Mode()&fs.ModePerm)
 			return nil
 		}
@@ -451,13 +482,13 @@ func (w *walker) walkDir(ctx context.Context, relPath string, info fs.FileInfo, 
 func (w *walker) walkSymlink(ctx context.Context, relPath string, info fs.FileInfo, finishedChan chan<- ScanResult) error {
 	// Symlinks are not supported on Windows. We ignore instead of returning
 	// an error.
-	if runtime.GOOS == "windows" {
+	if build.IsWindows {
 		return nil
 	}
 
-	f, err := CreateFileInfo(info, relPath, w.Filesystem)
+	f, err := CreateFileInfo(info, relPath, w.Filesystem, w.ScanOwnership, w.ScanXattrs, w.XattrFilter)
 	if err != nil {
-		handleError(ctx, "reading link:", relPath, err, finishedChan)
+		handleError(ctx, "reading link", relPath, err, finishedChan)
 		return nil
 	}
 
@@ -466,7 +497,14 @@ func (w *walker) walkSymlink(ctx context.Context, relPath string, info fs.FileIn
 	f = w.updateFileInfo(f, curFile)
 
 	if hasCurFile {
-		if curFile.IsEquivalentOptional(f, w.ModTimeWindow, w.IgnorePerms, true, w.LocalFlags) {
+		if curFile.IsEquivalentOptional(f, protocol.FileInfoComparison{
+			ModTimeWindow:   w.ModTimeWindow,
+			IgnorePerms:     w.IgnorePerms,
+			IgnoreBlocks:    true,
+			IgnoreFlags:     w.LocalFlags,
+			IgnoreOwnership: !w.ScanOwnership,
+			IgnoreXattrs:    !w.ScanXattrs,
+		}) {
 			l.Debugln(w, "unchanged:", curFile, info.ModTime().Unix(), info.Mode()&fs.ModePerm)
 			return nil
 		}
@@ -494,7 +532,7 @@ func (w *walker) walkSymlink(ctx context.Context, relPath string, info fs.FileIn
 // normalizePath returns the normalized relative path (possibly after fixing
 // it on disk), or skip is true.
 func (w *walker) normalizePath(path string, info fs.FileInfo) (normPath string, err error) {
-	if runtime.GOOS == "darwin" {
+	if build.IsDarwin {
 		// Mac OS X file names should always be NFD normalized.
 		normPath = norm.NFD.String(path)
 	} else {
@@ -550,17 +588,23 @@ func (w *walker) normalizePath(path string, info fs.FileInfo) (normPath string, 
 	return "", errUTF8Conflict
 }
 
-// updateFileInfo updates walker specific members of protocol.FileInfo that do not depend on type
-func (w *walker) updateFileInfo(file, curFile protocol.FileInfo) protocol.FileInfo {
-	if file.Type == protocol.FileInfoTypeFile && runtime.GOOS == "windows" {
+// updateFileInfo updates walker specific members of protocol.FileInfo that
+// do not depend on type, and things that should be preserved from the
+// previous version of the FileInfo.
+func (w *walker) updateFileInfo(dst, src protocol.FileInfo) protocol.FileInfo {
+	if dst.Type == protocol.FileInfoTypeFile && build.IsWindows {
 		// If we have an existing index entry, copy the executable bits
 		// from there.
-		file.Permissions |= (curFile.Permissions & 0111)
+		dst.Permissions |= (src.Permissions & 0111)
 	}
-	file.Version = curFile.Version.Update(w.ShortID)
-	file.ModifiedBy = w.ShortID
-	file.LocalFlags = w.LocalFlags
-	return file
+	dst.Version = src.Version.Update(w.ShortID)
+	dst.ModifiedBy = w.ShortID
+	dst.LocalFlags = w.LocalFlags
+
+	// Copy OS data from src to dst, unless it was already set on dst.
+	dst.Platform.MergeWith(&src.Platform)
+
+	return dst
 }
 
 func handleError(ctx context.Context, context, path string, err error, finishedChan chan<- ScanResult) {
@@ -626,12 +670,19 @@ func (c *byteCounter) Close() {
 
 type noCurrentFiler struct{}
 
-func (noCurrentFiler) CurrentFile(name string) (protocol.FileInfo, bool) {
+func (noCurrentFiler) CurrentFile(_ string) (protocol.FileInfo, bool) {
 	return protocol.FileInfo{}, false
 }
 
-func CreateFileInfo(fi fs.FileInfo, name string, filesystem fs.Filesystem) (protocol.FileInfo, error) {
+func CreateFileInfo(fi fs.FileInfo, name string, filesystem fs.Filesystem, scanOwnership bool, scanXattrs bool, xattrFilter XattrFilter) (protocol.FileInfo, error) {
 	f := protocol.FileInfo{Name: name}
+	if scanOwnership || scanXattrs {
+		if plat, err := filesystem.PlatformData(name, scanOwnership, scanXattrs, xattrFilter); err == nil {
+			f.Platform = plat
+		} else {
+			return protocol.FileInfo{}, fmt.Errorf("reading platform data: %w", err)
+		}
+	}
 	if fi.IsSymlink() {
 		f.Type = protocol.FileInfoTypeSymlink
 		target, err := filesystem.ReadSymlink(name)
@@ -651,5 +702,10 @@ func CreateFileInfo(fi fs.FileInfo, name string, filesystem fs.Filesystem) (prot
 	}
 	f.Size = fi.Size()
 	f.Type = protocol.FileInfoTypeFile
+	if ct := fi.InodeChangeTime(); !ct.IsZero() {
+		f.InodeChangeNs = ct.UnixNano()
+	} else {
+		f.InodeChangeNs = 0
+	}
 	return f, nil
 }

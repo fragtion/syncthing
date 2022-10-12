@@ -31,6 +31,8 @@ import (
 	"strings"
 	"text/template"
 	"time"
+
+	buildpkg "github.com/syncthing/syncthing/lib/build"
 )
 
 var (
@@ -393,7 +395,7 @@ func test(tags []string, pkgs ...string) {
 
 	if runtime.GOARCH == "amd64" {
 		switch runtime.GOOS {
-		case "darwin", "linux", "freebsd": // , "windows": # See https://github.com/golang/go/issues/27089
+		case buildpkg.Darwin, buildpkg.Linux, buildpkg.FreeBSD: // , "windows": # See https://github.com/golang/go/issues/27089
 			args = append(args, "-race")
 		}
 	}
@@ -882,8 +884,20 @@ func shouldRebuildAssets(target, srcdir string) bool {
 }
 
 func updateDependencies() {
-	runPrint(goCmd, "get", "-u", "./cmd/...")
-	runPrint(goCmd, "mod", "tidy", "-go=1.17", "-compat=1.17")
+	// Figure out desired Go version
+	bs, err := os.ReadFile("go.mod")
+	if err != nil {
+		log.Fatal(err)
+	}
+	re := regexp.MustCompile(`(?m)^go\s+([0-9.]+)`)
+	matches := re.FindSubmatch(bs)
+	if len(matches) != 2 {
+		log.Fatal("failed to parse go.mod")
+	}
+	goVersion := string(matches[1])
+
+	runPrint(goCmd, "get", "-u", "all")
+	runPrint(goCmd, "mod", "tidy", "-go="+goVersion, "-compat="+goVersion)
 
 	// We might have updated the protobuf package and should regenerate to match.
 	proto()
