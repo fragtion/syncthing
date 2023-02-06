@@ -3,7 +3,7 @@ module github.com/syncthing/syncthing
 go 1.18
 
 require (
-	github.com/AudriusButkevicius/pfilter v0.0.10
+	github.com/AudriusButkevicius/pfilter v0.0.11
 	github.com/AudriusButkevicius/recli v0.0.6
 	github.com/alecthomas/kong v0.7.1
 	github.com/calmh/xdr v1.1.0
@@ -74,6 +74,10 @@ require (
 	github.com/petermattis/goid v0.0.0-20221202122410-a449aaf35945 // indirect
 	github.com/power-devops/perfstat v0.0.0-20220216144756-c35f1ee13d7c // indirect
 	github.com/prometheus/client_model v0.3.0 // indirect
+	github.com/quic-go/qtls-go1-18 v0.2.0 // indirect
+	github.com/quic-go/qtls-go1-19 v0.2.0 // indirect
+	github.com/quic-go/qtls-go1-20 v0.1.0 // indirect
+	github.com/quic-go/quic-go v0.32.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.2 // indirect
 	golang.org/x/exp v0.0.0-20221211140036-ad323defaf05 // indirect
