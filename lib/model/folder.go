@@ -13,7 +13,6 @@ import (
 	"math/rand"
 	"path/filepath"
 	"sort"
-	"sync/atomic"
 	"time"
 
 	"github.com/syncthing/syncthing/lib/config"
@@ -142,8 +141,8 @@ func newFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg conf
 }
 
 func (f *folder) Serve(ctx context.Context) error {
-	atomic.AddInt32(&f.model.foldersRunning, 1)
-	defer atomic.AddInt32(&f.model.foldersRunning, -1)
+	f.model.foldersRunning.Add(1)
+	defer f.model.foldersRunning.Add(-1)
 
 	f.ctx = ctx
 
@@ -330,10 +329,12 @@ func (f *folder) getHealthErrorWithoutIgnores() error {
 		return err
 	}
 
-	dbPath := locations.Get(locations.Database)
-	if usage, err := fs.NewFilesystem(fs.FilesystemTypeBasic, dbPath).Usage("."); err == nil {
-		if err = config.CheckFreeSpace(f.model.cfg.Options().MinHomeDiskFree, usage); err != nil {
-			return fmt.Errorf("insufficient space on disk for database (%v): %w", dbPath, err)
+	if minFree := f.model.cfg.Options().MinHomeDiskFree; minFree.Value > 0 {
+		dbPath := locations.Get(locations.Database)
+		if usage, err := fs.NewFilesystem(fs.FilesystemTypeBasic, dbPath).Usage("."); err == nil {
+			if err = config.CheckFreeSpace(minFree, usage); err != nil {
+				return fmt.Errorf("insufficient space on disk for database (%v): %w", dbPath, err)
+			}
 		}
 	}
 
@@ -762,7 +763,7 @@ func (f *folder) scanSubdirsDeletedAndIgnored(subDirs []string, batch *scanBatch
 				fallthrough
 			case !file.IsIgnored() && !file.IsDeleted() && !file.IsUnsupported():
 				// The file is not ignored, deleted or unsupported. Lets check if
-				// it's still here. Simply stat:ing it wont do as there are
+				// it's still here. Simply stat:ing it won't do as there are
 				// tons of corner cases (e.g. parent dir->symlink, missing
 				// permissions)
 				if !osutil.IsDeleted(f.mtimefs, file.Name) {

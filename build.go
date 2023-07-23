@@ -207,6 +207,24 @@ var targets = map[string]target{
 			{src: "AUTHORS", dst: "deb/usr/share/doc/syncthing-relaypoolsrv/AUTHORS.txt", perm: 0644},
 		},
 	},
+	"stupgrades": {
+		name:        "stupgrades",
+		description: "Syncthing Upgrade Check Server",
+		buildPkgs:   []string{"github.com/syncthing/syncthing/cmd/stupgrades"},
+		binaryName:  "stupgrades",
+	},
+	"stcrashreceiver": {
+		name:        "stcrashreceiver",
+		description: "Syncthing Crash Server",
+		buildPkgs:   []string{"github.com/syncthing/syncthing/cmd/stcrashreceiver"},
+		binaryName:  "stcrashreceiver",
+	},
+	"ursrv": {
+		name:        "ursrv",
+		description: "Syncthing Usage Reporting Server",
+		buildPkgs:   []string{"github.com/syncthing/syncthing/cmd/ursrv"},
+		binaryName:  "ursrv",
+	},
 }
 
 func initTargets() {
@@ -319,6 +337,9 @@ func runCommand(cmd string, target target) {
 
 	case "transifex":
 		transifex()
+
+	case "weblate":
+		weblate()
 
 	case "tar":
 		buildTar(target, tags)
@@ -953,6 +974,11 @@ func transifex() {
 	runPrint(goCmd, "run", "../../../../script/transifexdl.go")
 }
 
+func weblate() {
+	os.Chdir("gui/default/assets/lang")
+	runPrint(goCmd, "run", "../../../../script/weblatedl.go")
+}
+
 func ldflags(tags []string) string {
 	b := new(strings.Builder)
 	b.WriteString("-w")
@@ -1088,8 +1114,12 @@ func getBranchSuffix() string {
 
 	branch = parts[len(parts)-1]
 	switch branch {
-	case "master", "release", "main":
+	case "release", "main":
 		// these are not special
+		return ""
+	}
+	if strings.HasPrefix(branch, "release-") {
+		// release branches are not special
 		return ""
 	}
 
