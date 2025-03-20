@@ -530,6 +530,32 @@ jobs:
         env:
           BASE_URL: ${{ secrets.NIGHTLY_BASE_URL }}
 
+      - name: Get version
+        run: |
+          version=$(go run build.go version)
+          echo "VERSION=$version" >> $GITHUB_ENV
+
+      - name: Install GitHub CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh
+
+      - name: Update nightly release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get the release ID for the 'nightly' release
+          release_id=$(gh api repos/$GITHUB_REPOSITORY/releases/tags/nightly --jq '.id')
+
+          # Delete existing assets in the nightly release
+          gh api repos/$GITHUB_REPOSITORY/releases/$release_id/assets --paginate --jq '.[].id' \
+            | xargs -I {} gh api repos/$GITHUB_REPOSITORY/releases/assets/{} -X DELETE
+
+          # Upload new assets to the nightly release
+          for asset in packages/*; do
+            gh release upload nightly "$asset"
+          done
+
   #
   # Push release artifacts to Spaces
   #
