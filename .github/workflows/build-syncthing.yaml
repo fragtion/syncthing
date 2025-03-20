@@ -35,6 +35,27 @@ env:
 
 jobs:
 
+  sync-tags:
+    name: Sync tags with upstream
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }} # Check out the main repository
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/syncthing/syncthing.git
+
+      - name: Fetch upstream tags
+        run: |
+          git fetch upstream --tags
+
+      - name: Push tags to origin
+        run: |
+          git push origin --tags --force
+
   #
   # Tests for all platforms. Runs a matrix build on Windows, Linux and Mac,
   # with the list of expected supported Go versions (current, previous).
@@ -42,21 +63,16 @@ jobs:
 
   build-test:
     name: Build and test
+    needs: sync-tags
     strategy:
       fail-fast: false
       matrix:
         runner: ["windows-latest", "ubuntu-latest", "macos-latest"]
-        # The oldest version in this list should match what we have in our go.mod.
-        # Variables don't seem to be supported here, or we could have done something nice.
         go: ["~1.23.0", "~1.24.0"]
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Set git to use LF
         if: matrix.runner == 'windows-latest'
-        # Without this, the Windows checkout will happen with CRLF line
-        # endings, which is fine for the source code but messes up tests
-        # that depend on data on disk being as expected. Ideally, those
-        # tests should be fixed, but not today.
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
