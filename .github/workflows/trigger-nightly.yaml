@@ -18,4 +18,4 @@ jobs:
           fetch-depth: 0
 
       - run: |
-          git push origin main:release-nightly
+          git push origin fragtion-main:release-nightly
