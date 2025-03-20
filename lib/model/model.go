@@ -2558,6 +2558,7 @@ func (m *model) DelayScan(folder string, next time.Duration) {
 // numHashers returns the number of hasher routines to use for a given folder,
 // taking into account configuration and available CPU cores.
 func (m *model) numHashers(folder string) int {
+/*
 	m.mut.RLock()
 	folderCfg := m.folderCfgs[folder]
 	numFolders := max(1, len(m.folderCfgs))
