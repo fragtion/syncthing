@@ -6,7 +6,11 @@
 
 package ignore
 
-import "time"
+import (
+	"time"
+
+	"github.com/syncthing/syncthing/lib/ignore/ignoreresult"
+)
 
 type nower interface {
 	Now() time.Time
@@ -15,19 +19,17 @@ type nower interface {
 var clock = nower(defaultClock{})
 
 type cache struct {
-	patterns []Pattern
-	entries  map[string]cacheEntry
+	entries map[string]cacheEntry
 }
 
 type cacheEntry struct {
-	result Result
+	result ignoreresult.R
 	access int64 // Unix nanosecond count. Sufficient until the year 2262.
 }
 
-func newCache(patterns []Pattern) *cache {
+func newCache() *cache {
 	return &cache{
-		patterns: patterns,
-		entries:  make(map[string]cacheEntry),
+		entries: make(map[string]cacheEntry),
 	}
 }
 
@@ -39,7 +41,7 @@ func (c *cache) clean(d time.Duration) {
 	}
 }
 
-func (c *cache) get(key string) (Result, bool) {
+func (c *cache) get(key string) (ignoreresult.R, bool) {
 	entry, ok := c.entries[key]
 	if ok {
 		entry.access = clock.Now().UnixNano()
@@ -48,7 +50,7 @@ func (c *cache) get(key string) (Result, bool) {
 	return entry.result, ok
 }
 
-func (c *cache) set(key string, result Result) {
+func (c *cache) set(key string, result ignoreresult.R) {
 	c.entries[key] = cacheEntry{result, time.Now().UnixNano()}
 }
 

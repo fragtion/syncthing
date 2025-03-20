@@ -7,13 +7,18 @@
 package main
 
 import (
-	"os"
-
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/collectors"
 )
 
 var (
+	buildInfo = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "syncthing",
+			Subsystem: "discovery",
+			Name:      "build_info",
+			Help:      "A metric with a constant '1' value labeled by version, goversion, builduser and builddate from which stdiscosrv was built.",
+		}, []string{"version", "goversion", "builduser", "builddate"})
+
 	apiRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "syncthing",
@@ -90,6 +95,29 @@ var (
 			Help:       "Latency of database operations.",
 			Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 		}, []string{"operation"})
+
+	databaseWriteSeconds = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "syncthing",
+			Subsystem: "discovery",
+			Name:      "database_write_seconds",
+			Help:      "Time spent writing the database.",
+		})
+	databaseLastWritten = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "syncthing",
+			Subsystem: "discovery",
+			Name:      "database_last_written",
+			Help:      "Timestamp of the last successful database write.",
+		})
+
+	retryAfterLevel = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "syncthing",
+			Subsystem: "discovery",
+			Name:      "retry_after_seconds",
+			Help:      "Retry-After header value in seconds.",
+		}, []string{"name"})
 )
 
 const (
@@ -104,21 +132,12 @@ const (
 )
 
 func init() {
-	prometheus.MustRegister(apiRequestsTotal, apiRequestsSeconds,
+	prometheus.MustRegister(buildInfo,
+		apiRequestsTotal, apiRequestsSeconds,
 		lookupRequestsTotal, announceRequestsTotal,
 		replicationSendsTotal, replicationRecvsTotal,
 		databaseKeys, databaseStatisticsSeconds,
-		databaseOperations, databaseOperationSeconds)
-
-	processCollectorOpts := collectors.ProcessCollectorOpts{
-		Namespace: "syncthing_discovery",
-		PidFn: func() (int, error) {
-			return os.Getpid(), nil
-		},
-	}
-
-	prometheus.MustRegister(
-		collectors.NewProcessCollector(processCollectorOpts),
-	)
-
+		databaseOperations, databaseOperationSeconds,
+		databaseWriteSeconds, databaseLastWritten,
+		retryAfterLevel)
 }

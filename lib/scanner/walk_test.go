@@ -9,6 +9,7 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -20,14 +21,14 @@ import (
 	"testing"
 
 	"github.com/d4l3k/messagediff"
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/rand"
-	"github.com/syncthing/syncthing/lib/sha256"
-	"golang.org/x/text/unicode/norm"
 )
 
 type testfile struct {
@@ -238,8 +239,12 @@ func TestNormalization(t *testing.T) {
 			if fd, err := testFs.OpenFile(filepath.Join("normalization", s1, s2), os.O_CREATE|os.O_EXCL, 0o644); err != nil {
 				t.Fatal(err)
 			} else {
-				fd.Write([]byte("test"))
-				fd.Close()
+				if _, err := fd.Write([]byte("test")); err != nil {
+					t.Fatal(err)
+				}
+				if err := fd.Close(); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
 	}
@@ -362,7 +367,7 @@ func TestWalkSymlinkUnix(t *testing.T) {
 		if len(files[0].Blocks) != 0 {
 			t.Errorf("expected zero blocks for symlink, not %d", len(files[0].Blocks))
 		}
-		if files[0].SymlinkTarget != "../testdata" {
+		if string(files[0].SymlinkTarget) != "../testdata" {
 			t.Errorf("expected symlink to have target destination, not %q", files[0].SymlinkTarget)
 		}
 	}
@@ -635,7 +640,7 @@ func BenchmarkHashFile(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if _, err := HashFile(context.TODO(), testFs, testdataName, protocol.MinBlockSize, nil, true); err != nil {
+		if _, err := HashFile(context.TODO(), "", testFs, testdataName, protocol.MinBlockSize, nil, true); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -873,8 +878,8 @@ func TestSkipIgnoredDirs(t *testing.T) {
 	if err := pats.Parse(bytes.NewBufferString(stignore), ".stignore"); err != nil {
 		t.Fatal(err)
 	}
-	if !pats.SkipIgnoredDirs() {
-		t.Error("SkipIgnoredDirs should be true")
+	if m := pats.Match("whatever"); !m.CanSkipDir() {
+		t.Error("CanSkipDir should be true", m)
 	}
 
 	w.Matcher = pats

@@ -26,10 +26,20 @@ type Connection struct {
 	closedReturnsOnCall map[int]struct {
 		result1 <-chan struct{}
 	}
-	ClusterConfigStub        func(protocol.ClusterConfig)
+	ClusterConfigStub        func(*protocol.ClusterConfig)
 	clusterConfigMutex       sync.RWMutex
 	clusterConfigArgsForCall []struct {
-		arg1 protocol.ClusterConfig
+		arg1 *protocol.ClusterConfig
+	}
+	ConnectionIDStub        func() string
+	connectionIDMutex       sync.RWMutex
+	connectionIDArgsForCall []struct {
+	}
+	connectionIDReturns struct {
+		result1 string
+	}
+	connectionIDReturnsOnCall map[int]struct {
+		result1 string
 	}
 	CryptoStub        func() string
 	cryptoMutex       sync.RWMutex
@@ -41,12 +51,21 @@ type Connection struct {
 	cryptoReturnsOnCall map[int]struct {
 		result1 string
 	}
-	DownloadProgressStub        func(context.Context, string, []protocol.FileDownloadProgressUpdate)
+	DeviceIDStub        func() protocol.DeviceID
+	deviceIDMutex       sync.RWMutex
+	deviceIDArgsForCall []struct {
+	}
+	deviceIDReturns struct {
+		result1 protocol.DeviceID
+	}
+	deviceIDReturnsOnCall map[int]struct {
+		result1 protocol.DeviceID
+	}
+	DownloadProgressStub        func(context.Context, *protocol.DownloadProgress)
 	downloadProgressMutex       sync.RWMutex
 	downloadProgressArgsForCall []struct {
 		arg1 context.Context
-		arg2 string
-		arg3 []protocol.FileDownloadProgressUpdate
+		arg2 *protocol.DownloadProgress
 	}
 	EstablishedAtStub        func() time.Time
 	establishedAtMutex       sync.RWMutex
@@ -58,22 +77,11 @@ type Connection struct {
 	establishedAtReturnsOnCall map[int]struct {
 		result1 time.Time
 	}
-	IDStub        func() protocol.DeviceID
-	iDMutex       sync.RWMutex
-	iDArgsForCall []struct {
-	}
-	iDReturns struct {
-		result1 protocol.DeviceID
-	}
-	iDReturnsOnCall map[int]struct {
-		result1 protocol.DeviceID
-	}
-	IndexStub        func(context.Context, string, []protocol.FileInfo) error
+	IndexStub        func(context.Context, *protocol.Index) error
 	indexMutex       sync.RWMutex
 	indexArgsForCall []struct {
 		arg1 context.Context
-		arg2 string
-		arg3 []protocol.FileInfo
+		arg2 *protocol.Index
 	}
 	indexReturns struct {
 		result1 error
@@ -81,12 +89,11 @@ type Connection struct {
 	indexReturnsOnCall map[int]struct {
 		result1 error
 	}
-	IndexUpdateStub        func(context.Context, string, []protocol.FileInfo) error
+	IndexUpdateStub        func(context.Context, *protocol.IndexUpdate) error
 	indexUpdateMutex       sync.RWMutex
 	indexUpdateArgsForCall []struct {
 		arg1 context.Context
-		arg2 string
-		arg3 []protocol.FileInfo
+		arg2 *protocol.IndexUpdate
 	}
 	indexUpdateReturns struct {
 		result1 error
@@ -124,18 +131,11 @@ type Connection struct {
 	remoteAddrReturnsOnCall map[int]struct {
 		result1 net.Addr
 	}
-	RequestStub        func(context.Context, string, string, int, int64, int, []byte, uint32, bool) ([]byte, error)
+	RequestStub        func(context.Context, *protocol.Request) ([]byte, error)
 	requestMutex       sync.RWMutex
 	requestArgsForCall []struct {
 		arg1 context.Context
-		arg2 string
-		arg3 string
-		arg4 int
-		arg5 int64
-		arg6 int
-		arg7 []byte
-		arg8 uint32
-		arg9 bool
+		arg2 *protocol.Request
 	}
 	requestReturns struct {
 		result1 []byte
@@ -283,10 +283,10 @@ func (fake *Connection) ClosedReturnsOnCall(i int, result1 <-chan struct{}) {
 	}{result1}
 }
 
-func (fake *Connection) ClusterConfig(arg1 protocol.ClusterConfig) {
+func (fake *Connection) ClusterConfig(arg1 *protocol.ClusterConfig) {
 	fake.clusterConfigMutex.Lock()
 	fake.clusterConfigArgsForCall = append(fake.clusterConfigArgsForCall, struct {
-		arg1 protocol.ClusterConfig
+		arg1 *protocol.ClusterConfig
 	}{arg1})
 	stub := fake.ClusterConfigStub
 	fake.recordInvocation("ClusterConfig", []interface{}{arg1})
@@ -302,17 +302,70 @@ func (fake *Connection) ClusterConfigCallCount() int {
 	return len(fake.clusterConfigArgsForCall)
 }
 
-func (fake *Connection) ClusterConfigCalls(stub func(protocol.ClusterConfig)) {
+func (fake *Connection) ClusterConfigCalls(stub func(*protocol.ClusterConfig)) {
 	fake.clusterConfigMutex.Lock()
 	defer fake.clusterConfigMutex.Unlock()
 	fake.ClusterConfigStub = stub
 }
 
-func (fake *Connection) ClusterConfigArgsForCall(i int) protocol.ClusterConfig {
+func (fake *Connection) ClusterConfigArgsForCall(i int) *protocol.ClusterConfig {
 	fake.clusterConfigMutex.RLock()
 	defer fake.clusterConfigMutex.RUnlock()
 	argsForCall := fake.clusterConfigArgsForCall[i]
 	return argsForCall.arg1
+}
+
+func (fake *Connection) ConnectionID() string {
+	fake.connectionIDMutex.Lock()
+	ret, specificReturn := fake.connectionIDReturnsOnCall[len(fake.connectionIDArgsForCall)]
+	fake.connectionIDArgsForCall = append(fake.connectionIDArgsForCall, struct {
+	}{})
+	stub := fake.ConnectionIDStub
+	fakeReturns := fake.connectionIDReturns
+	fake.recordInvocation("ConnectionID", []interface{}{})
+	fake.connectionIDMutex.Unlock()
+	if stub != nil {
+		return stub()
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *Connection) ConnectionIDCallCount() int {
+	fake.connectionIDMutex.RLock()
+	defer fake.connectionIDMutex.RUnlock()
+	return len(fake.connectionIDArgsForCall)
+}
+
+func (fake *Connection) ConnectionIDCalls(stub func() string) {
+	fake.connectionIDMutex.Lock()
+	defer fake.connectionIDMutex.Unlock()
+	fake.ConnectionIDStub = stub
+}
+
+func (fake *Connection) ConnectionIDReturns(result1 string) {
+	fake.connectionIDMutex.Lock()
+	defer fake.connectionIDMutex.Unlock()
+	fake.ConnectionIDStub = nil
+	fake.connectionIDReturns = struct {
+		result1 string
+	}{result1}
+}
+
+func (fake *Connection) ConnectionIDReturnsOnCall(i int, result1 string) {
+	fake.connectionIDMutex.Lock()
+	defer fake.connectionIDMutex.Unlock()
+	fake.ConnectionIDStub = nil
+	if fake.connectionIDReturnsOnCall == nil {
+		fake.connectionIDReturnsOnCall = make(map[int]struct {
+			result1 string
+		})
+	}
+	fake.connectionIDReturnsOnCall[i] = struct {
+		result1 string
+	}{result1}
 }
 
 func (fake *Connection) Crypto() string {
@@ -368,23 +421,70 @@ func (fake *Connection) CryptoReturnsOnCall(i int, result1 string) {
 	}{result1}
 }
 
-func (fake *Connection) DownloadProgress(arg1 context.Context, arg2 string, arg3 []protocol.FileDownloadProgressUpdate) {
-	var arg3Copy []protocol.FileDownloadProgressUpdate
-	if arg3 != nil {
-		arg3Copy = make([]protocol.FileDownloadProgressUpdate, len(arg3))
-		copy(arg3Copy, arg3)
+func (fake *Connection) DeviceID() protocol.DeviceID {
+	fake.deviceIDMutex.Lock()
+	ret, specificReturn := fake.deviceIDReturnsOnCall[len(fake.deviceIDArgsForCall)]
+	fake.deviceIDArgsForCall = append(fake.deviceIDArgsForCall, struct {
+	}{})
+	stub := fake.DeviceIDStub
+	fakeReturns := fake.deviceIDReturns
+	fake.recordInvocation("DeviceID", []interface{}{})
+	fake.deviceIDMutex.Unlock()
+	if stub != nil {
+		return stub()
 	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *Connection) DeviceIDCallCount() int {
+	fake.deviceIDMutex.RLock()
+	defer fake.deviceIDMutex.RUnlock()
+	return len(fake.deviceIDArgsForCall)
+}
+
+func (fake *Connection) DeviceIDCalls(stub func() protocol.DeviceID) {
+	fake.deviceIDMutex.Lock()
+	defer fake.deviceIDMutex.Unlock()
+	fake.DeviceIDStub = stub
+}
+
+func (fake *Connection) DeviceIDReturns(result1 protocol.DeviceID) {
+	fake.deviceIDMutex.Lock()
+	defer fake.deviceIDMutex.Unlock()
+	fake.DeviceIDStub = nil
+	fake.deviceIDReturns = struct {
+		result1 protocol.DeviceID
+	}{result1}
+}
+
+func (fake *Connection) DeviceIDReturnsOnCall(i int, result1 protocol.DeviceID) {
+	fake.deviceIDMutex.Lock()
+	defer fake.deviceIDMutex.Unlock()
+	fake.DeviceIDStub = nil
+	if fake.deviceIDReturnsOnCall == nil {
+		fake.deviceIDReturnsOnCall = make(map[int]struct {
+			result1 protocol.DeviceID
+		})
+	}
+	fake.deviceIDReturnsOnCall[i] = struct {
+		result1 protocol.DeviceID
+	}{result1}
+}
+
+func (fake *Connection) DownloadProgress(arg1 context.Context, arg2 *protocol.DownloadProgress) {
 	fake.downloadProgressMutex.Lock()
 	fake.downloadProgressArgsForCall = append(fake.downloadProgressArgsForCall, struct {
 		arg1 context.Context
-		arg2 string
-		arg3 []protocol.FileDownloadProgressUpdate
-	}{arg1, arg2, arg3Copy})
+		arg2 *protocol.DownloadProgress
+	}{arg1, arg2})
 	stub := fake.DownloadProgressStub
-	fake.recordInvocation("DownloadProgress", []interface{}{arg1, arg2, arg3Copy})
+	fake.recordInvocation("DownloadProgress", []interface{}{arg1, arg2})
 	fake.downloadProgressMutex.Unlock()
 	if stub != nil {
-		fake.DownloadProgressStub(arg1, arg2, arg3)
+		fake.DownloadProgressStub(arg1, arg2)
 	}
 }
 
@@ -394,17 +494,17 @@ func (fake *Connection) DownloadProgressCallCount() int {
 	return len(fake.downloadProgressArgsForCall)
 }
 
-func (fake *Connection) DownloadProgressCalls(stub func(context.Context, string, []protocol.FileDownloadProgressUpdate)) {
+func (fake *Connection) DownloadProgressCalls(stub func(context.Context, *protocol.DownloadProgress)) {
 	fake.downloadProgressMutex.Lock()
 	defer fake.downloadProgressMutex.Unlock()
 	fake.DownloadProgressStub = stub
 }
 
-func (fake *Connection) DownloadProgressArgsForCall(i int) (context.Context, string, []protocol.FileDownloadProgressUpdate) {
+func (fake *Connection) DownloadProgressArgsForCall(i int) (context.Context, *protocol.DownloadProgress) {
 	fake.downloadProgressMutex.RLock()
 	defer fake.downloadProgressMutex.RUnlock()
 	argsForCall := fake.downloadProgressArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+	return argsForCall.arg1, argsForCall.arg2
 }
 
 func (fake *Connection) EstablishedAt() time.Time {
@@ -460,78 +560,19 @@ func (fake *Connection) EstablishedAtReturnsOnCall(i int, result1 time.Time) {
 	}{result1}
 }
 
-func (fake *Connection) ID() protocol.DeviceID {
-	fake.iDMutex.Lock()
-	ret, specificReturn := fake.iDReturnsOnCall[len(fake.iDArgsForCall)]
-	fake.iDArgsForCall = append(fake.iDArgsForCall, struct {
-	}{})
-	stub := fake.IDStub
-	fakeReturns := fake.iDReturns
-	fake.recordInvocation("ID", []interface{}{})
-	fake.iDMutex.Unlock()
-	if stub != nil {
-		return stub()
-	}
-	if specificReturn {
-		return ret.result1
-	}
-	return fakeReturns.result1
-}
-
-func (fake *Connection) IDCallCount() int {
-	fake.iDMutex.RLock()
-	defer fake.iDMutex.RUnlock()
-	return len(fake.iDArgsForCall)
-}
-
-func (fake *Connection) IDCalls(stub func() protocol.DeviceID) {
-	fake.iDMutex.Lock()
-	defer fake.iDMutex.Unlock()
-	fake.IDStub = stub
-}
-
-func (fake *Connection) IDReturns(result1 protocol.DeviceID) {
-	fake.iDMutex.Lock()
-	defer fake.iDMutex.Unlock()
-	fake.IDStub = nil
-	fake.iDReturns = struct {
-		result1 protocol.DeviceID
-	}{result1}
-}
-
-func (fake *Connection) IDReturnsOnCall(i int, result1 protocol.DeviceID) {
-	fake.iDMutex.Lock()
-	defer fake.iDMutex.Unlock()
-	fake.IDStub = nil
-	if fake.iDReturnsOnCall == nil {
-		fake.iDReturnsOnCall = make(map[int]struct {
-			result1 protocol.DeviceID
-		})
-	}
-	fake.iDReturnsOnCall[i] = struct {
-		result1 protocol.DeviceID
-	}{result1}
-}
-
-func (fake *Connection) Index(arg1 context.Context, arg2 string, arg3 []protocol.FileInfo) error {
-	var arg3Copy []protocol.FileInfo
-	if arg3 != nil {
-		arg3Copy = make([]protocol.FileInfo, len(arg3))
-		copy(arg3Copy, arg3)
-	}
+func (fake *Connection) Index(arg1 context.Context, arg2 *protocol.Index) error {
 	fake.indexMutex.Lock()
 	ret, specificReturn := fake.indexReturnsOnCall[len(fake.indexArgsForCall)]
 	fake.indexArgsForCall = append(fake.indexArgsForCall, struct {
 		arg1 context.Context
-		arg2 string
-		arg3 []protocol.FileInfo
-	}{arg1, arg2, arg3Copy})
+		arg2 *protocol.Index
+	}{arg1, arg2})
 	stub := fake.IndexStub
 	fakeReturns := fake.indexReturns
-	fake.recordInvocation("Index", []interface{}{arg1, arg2, arg3Copy})
+	fake.recordInvocation("Index", []interface{}{arg1, arg2})
 	fake.indexMutex.Unlock()
 	if stub != nil {
-		return stub(arg1, arg2, arg3)
+		return stub(arg1, arg2)
 	}
 	if specificReturn {
 		return ret.result1
@@ -545,17 +586,17 @@ func (fake *Connection) IndexCallCount() int {
 	return len(fake.indexArgsForCall)
 }
 
-func (fake *Connection) IndexCalls(stub func(context.Context, string, []protocol.FileInfo) error) {
+func (fake *Connection) IndexCalls(stub func(context.Context, *protocol.Index) error) {
 	fake.indexMutex.Lock()
 	defer fake.indexMutex.Unlock()
 	fake.IndexStub = stub
 }
 
-func (fake *Connection) IndexArgsForCall(i int) (context.Context, string, []protocol.FileInfo) {
+func (fake *Connection) IndexArgsForCall(i int) (context.Context, *protocol.Index) {
 	fake.indexMutex.RLock()
 	defer fake.indexMutex.RUnlock()
 	argsForCall := fake.indexArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+	return argsForCall.arg1, argsForCall.arg2
 }
 
 func (fake *Connection) IndexReturns(result1 error) {
@@ -581,25 +622,19 @@ func (fake *Connection) IndexReturnsOnCall(i int, result1 error) {
 	}{result1}
 }
 
-func (fake *Connection) IndexUpdate(arg1 context.Context, arg2 string, arg3 []protocol.FileInfo) error {
-	var arg3Copy []protocol.FileInfo
-	if arg3 != nil {
-		arg3Copy = make([]protocol.FileInfo, len(arg3))
-		copy(arg3Copy, arg3)
-	}
+func (fake *Connection) IndexUpdate(arg1 context.Context, arg2 *protocol.IndexUpdate) error {
 	fake.indexUpdateMutex.Lock()
 	ret, specificReturn := fake.indexUpdateReturnsOnCall[len(fake.indexUpdateArgsForCall)]
 	fake.indexUpdateArgsForCall = append(fake.indexUpdateArgsForCall, struct {
 		arg1 context.Context
-		arg2 string
-		arg3 []protocol.FileInfo
-	}{arg1, arg2, arg3Copy})
+		arg2 *protocol.IndexUpdate
+	}{arg1, arg2})
 	stub := fake.IndexUpdateStub
 	fakeReturns := fake.indexUpdateReturns
-	fake.recordInvocation("IndexUpdate", []interface{}{arg1, arg2, arg3Copy})
+	fake.recordInvocation("IndexUpdate", []interface{}{arg1, arg2})
 	fake.indexUpdateMutex.Unlock()
 	if stub != nil {
-		return stub(arg1, arg2, arg3)
+		return stub(arg1, arg2)
 	}
 	if specificReturn {
 		return ret.result1
@@ -613,17 +648,17 @@ func (fake *Connection) IndexUpdateCallCount() int {
 	return len(fake.indexUpdateArgsForCall)
 }
 
-func (fake *Connection) IndexUpdateCalls(stub func(context.Context, string, []protocol.FileInfo) error) {
+func (fake *Connection) IndexUpdateCalls(stub func(context.Context, *protocol.IndexUpdate) error) {
 	fake.indexUpdateMutex.Lock()
 	defer fake.indexUpdateMutex.Unlock()
 	fake.IndexUpdateStub = stub
 }
 
-func (fake *Connection) IndexUpdateArgsForCall(i int) (context.Context, string, []protocol.FileInfo) {
+func (fake *Connection) IndexUpdateArgsForCall(i int) (context.Context, *protocol.IndexUpdate) {
 	fake.indexUpdateMutex.RLock()
 	defer fake.indexUpdateMutex.RUnlock()
 	argsForCall := fake.indexUpdateArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+	return argsForCall.arg1, argsForCall.arg2
 }
 
 func (fake *Connection) IndexUpdateReturns(result1 error) {
@@ -808,31 +843,19 @@ func (fake *Connection) RemoteAddrReturnsOnCall(i int, result1 net.Addr) {
 	}{result1}
 }
 
-func (fake *Connection) Request(arg1 context.Context, arg2 string, arg3 string, arg4 int, arg5 int64, arg6 int, arg7 []byte, arg8 uint32, arg9 bool) ([]byte, error) {
-	var arg7Copy []byte
-	if arg7 != nil {
-		arg7Copy = make([]byte, len(arg7))
-		copy(arg7Copy, arg7)
-	}
+func (fake *Connection) Request(arg1 context.Context, arg2 *protocol.Request) ([]byte, error) {
 	fake.requestMutex.Lock()
 	ret, specificReturn := fake.requestReturnsOnCall[len(fake.requestArgsForCall)]
 	fake.requestArgsForCall = append(fake.requestArgsForCall, struct {
 		arg1 context.Context
-		arg2 string
-		arg3 string
-		arg4 int
-		arg5 int64
-		arg6 int
-		arg7 []byte
-		arg8 uint32
-		arg9 bool
-	}{arg1, arg2, arg3, arg4, arg5, arg6, arg7Copy, arg8, arg9})
+		arg2 *protocol.Request
+	}{arg1, arg2})
 	stub := fake.RequestStub
 	fakeReturns := fake.requestReturns
-	fake.recordInvocation("Request", []interface{}{arg1, arg2, arg3, arg4, arg5, arg6, arg7Copy, arg8, arg9})
+	fake.recordInvocation("Request", []interface{}{arg1, arg2})
 	fake.requestMutex.Unlock()
 	if stub != nil {
-		return stub(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9)
+		return stub(arg1, arg2)
 	}
 	if specificReturn {
 		return ret.result1, ret.result2
@@ -846,17 +869,17 @@ func (fake *Connection) RequestCallCount() int {
 	return len(fake.requestArgsForCall)
 }
 
-func (fake *Connection) RequestCalls(stub func(context.Context, string, string, int, int64, int, []byte, uint32, bool) ([]byte, error)) {
+func (fake *Connection) RequestCalls(stub func(context.Context, *protocol.Request) ([]byte, error)) {
 	fake.requestMutex.Lock()
 	defer fake.requestMutex.Unlock()
 	fake.RequestStub = stub
 }
 
-func (fake *Connection) RequestArgsForCall(i int) (context.Context, string, string, int, int64, int, []byte, uint32, bool) {
+func (fake *Connection) RequestArgsForCall(i int) (context.Context, *protocol.Request) {
 	fake.requestMutex.RLock()
 	defer fake.requestMutex.RUnlock()
 	argsForCall := fake.requestArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4, argsForCall.arg5, argsForCall.arg6, argsForCall.arg7, argsForCall.arg8, argsForCall.arg9
+	return argsForCall.arg1, argsForCall.arg2
 }
 
 func (fake *Connection) RequestReturns(result1 []byte, result2 error) {
@@ -1162,14 +1185,16 @@ func (fake *Connection) Invocations() map[string][][]interface{} {
 	defer fake.closedMutex.RUnlock()
 	fake.clusterConfigMutex.RLock()
 	defer fake.clusterConfigMutex.RUnlock()
+	fake.connectionIDMutex.RLock()
+	defer fake.connectionIDMutex.RUnlock()
 	fake.cryptoMutex.RLock()
 	defer fake.cryptoMutex.RUnlock()
+	fake.deviceIDMutex.RLock()
+	defer fake.deviceIDMutex.RUnlock()
 	fake.downloadProgressMutex.RLock()
 	defer fake.downloadProgressMutex.RUnlock()
 	fake.establishedAtMutex.RLock()
 	defer fake.establishedAtMutex.RUnlock()
-	fake.iDMutex.RLock()
-	defer fake.iDMutex.RUnlock()
 	fake.indexMutex.RLock()
 	defer fake.indexMutex.RUnlock()
 	fake.indexUpdateMutex.RLock()

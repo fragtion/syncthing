@@ -15,7 +15,7 @@ import (
 
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/protocol"
-	"github.com/syncthing/syncthing/lib/util"
+	"github.com/syncthing/syncthing/lib/structutil"
 )
 
 type configMuxBuilder struct {
@@ -212,7 +212,7 @@ func (c *configMuxBuilder) registerDefaultFolder(path string) {
 
 	c.HandlerFunc(http.MethodPut, path, func(w http.ResponseWriter, r *http.Request) {
 		var cfg config.FolderConfiguration
-		util.SetDefaults(&cfg)
+		structutil.SetDefaults(&cfg)
 		c.adjustFolder(w, r, cfg, true)
 	})
 
@@ -228,7 +228,7 @@ func (c *configMuxBuilder) registerDefaultDevice(path string) {
 
 	c.HandlerFunc(http.MethodPut, path, func(w http.ResponseWriter, r *http.Request) {
 		var cfg config.DeviceConfiguration
-		util.SetDefaults(&cfg)
+		structutil.SetDefaults(&cfg)
 		c.adjustDevice(w, r, cfg, true)
 	})
 
@@ -266,7 +266,7 @@ func (c *configMuxBuilder) registerOptions(path string) {
 
 	c.HandlerFunc(http.MethodPut, path, func(w http.ResponseWriter, r *http.Request) {
 		var cfg config.OptionsConfiguration
-		util.SetDefaults(&cfg)
+		structutil.SetDefaults(&cfg)
 		c.adjustOptions(w, r, cfg)
 	})
 
@@ -282,7 +282,7 @@ func (c *configMuxBuilder) registerLDAP(path string) {
 
 	c.HandlerFunc(http.MethodPut, path, func(w http.ResponseWriter, r *http.Request) {
 		var cfg config.LDAPConfiguration
-		util.SetDefaults(&cfg)
+		structutil.SetDefaults(&cfg)
 		c.adjustLDAP(w, r, cfg)
 	})
 
@@ -298,7 +298,7 @@ func (c *configMuxBuilder) registerGUI(path string) {
 
 	c.HandlerFunc(http.MethodPut, path, func(w http.ResponseWriter, r *http.Request) {
 		var cfg config.GUIConfiguration
-		util.SetDefaults(&cfg)
+		structutil.SetDefaults(&cfg)
 		c.adjustGUI(w, r, cfg)
 	})
 
@@ -318,13 +318,10 @@ func (c *configMuxBuilder) adjustConfig(w http.ResponseWriter, r *http.Request) 
 	var errMsg string
 	var status int
 	waiter, err := c.cfg.Modify(func(cfg *config.Configuration) {
-		if to.GUI.Password != cfg.GUI.Password {
-			if err := to.GUI.HashAndSetPassword(to.GUI.Password); err != nil {
-				l.Warnln("hashing password:", err)
-				errMsg = err.Error()
-				status = http.StatusInternalServerError
-				return
-			}
+		if err := c.postAdjustGui(&cfg.GUI, &to.GUI); err != nil {
+			errMsg = err.Error()
+			status = http.StatusInternalServerError
+			return
 		}
 		*cfg = to
 	})
@@ -391,7 +388,6 @@ func (c *configMuxBuilder) adjustOptions(w http.ResponseWriter, r *http.Request,
 }
 
 func (c *configMuxBuilder) adjustGUI(w http.ResponseWriter, r *http.Request, gui config.GUIConfiguration) {
-	oldPassword := gui.Password
 	err := unmarshalTo(r.Body, &gui)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -400,13 +396,10 @@ func (c *configMuxBuilder) adjustGUI(w http.ResponseWriter, r *http.Request, gui
 	var errMsg string
 	var status int
 	waiter, err := c.cfg.Modify(func(cfg *config.Configuration) {
-		if gui.Password != oldPassword {
-			if err := gui.HashAndSetPassword(gui.Password); err != nil {
-				l.Warnln("hashing password:", err)
-				errMsg = err.Error()
-				status = http.StatusInternalServerError
-				return
-			}
+		if err := c.postAdjustGui(&cfg.GUI, &gui); err != nil {
+			errMsg = err.Error()
+			status = http.StatusInternalServerError
+			return
 		}
 		cfg.GUI = gui
 	})
@@ -417,6 +410,16 @@ func (c *configMuxBuilder) adjustGUI(w http.ResponseWriter, r *http.Request, gui
 		return
 	}
 	c.finish(w, waiter)
+}
+
+func (c *configMuxBuilder) postAdjustGui(from *config.GUIConfiguration, to *config.GUIConfiguration) error {
+	if to.Password != from.Password {
+		if err := to.SetPassword(to.Password); err != nil {
+			l.Warnln("hashing password:", err)
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *configMuxBuilder) adjustLDAP(w http.ResponseWriter, r *http.Request, ldap config.LDAPConfiguration) {

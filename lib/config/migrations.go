@@ -17,8 +17,8 @@ import (
 
 	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/fs"
+	"github.com/syncthing/syncthing/lib/netutil"
 	"github.com/syncthing/syncthing/lib/upgrade"
-	"github.com/syncthing/syncthing/lib/util"
 )
 
 // migrations is the set of config migration functions, with their target
@@ -114,7 +114,7 @@ func migrateToConfigV35(cfg *Configuration) {
 	for i, fcfg := range cfg.Folders {
 		params := fcfg.Versioning.Params
 		if params["fsType"] != "" {
-			var fsType fs.FilesystemType
+			var fsType FilesystemType
 			_ = fsType.UnmarshalText([]byte(params["fsType"]))
 			cfg.Folders[i].Versioning.FSType = fsType
 		}
@@ -197,11 +197,11 @@ func migrateToConfigV24(cfg *Configuration) {
 }
 
 func migrateToConfigV23(cfg *Configuration) {
-	permBits := fs.FileMode(0777)
+	permBits := fs.FileMode(0o777)
 	if build.IsWindows {
 		// Windows has no umask so we must chose a safer set of bits to
 		// begin with.
-		permBits = 0700
+		permBits = 0o700
 	}
 
 	// Upgrade code remains hardcoded for .stfolder despite configurable
@@ -228,7 +228,7 @@ func migrateToConfigV23(cfg *Configuration) {
 
 func migrateToConfigV22(cfg *Configuration) {
 	for i := range cfg.Folders {
-		cfg.Folders[i].FilesystemType = fs.FilesystemTypeBasic
+		cfg.Folders[i].FilesystemType = FilesystemTypeBasic
 		// Migrate to templated external versioner commands
 		if cfg.Folders[i].Versioning.Type == "external" {
 			cfg.Folders[i].Versioning.Params["command"] += " %FOLDER_PATH% %FILE_PATH%"
@@ -238,7 +238,7 @@ func migrateToConfigV22(cfg *Configuration) {
 
 func migrateToConfigV21(cfg *Configuration) {
 	for _, folder := range cfg.Folders {
-		if folder.FilesystemType != fs.FilesystemTypeBasic {
+		if folder.FilesystemType != FilesystemTypeBasic {
 			continue
 		}
 		switch folder.Versioning.Type {
@@ -391,14 +391,14 @@ func migrateToConfigV12(cfg *Configuration) {
 	// Change listen address schema
 	for i, addr := range cfg.Options.RawListenAddresses {
 		if len(addr) > 0 && !strings.HasPrefix(addr, "tcp://") {
-			cfg.Options.RawListenAddresses[i] = util.Address("tcp", addr)
+			cfg.Options.RawListenAddresses[i] = netutil.AddressURL("tcp", addr)
 		}
 	}
 
 	for i, device := range cfg.Devices {
 		for j, addr := range device.Addresses {
 			if addr != "dynamic" && addr != "" {
-				cfg.Devices[i].Addresses[j] = util.Address("tcp", addr)
+				cfg.Devices[i].Addresses[j] = netutil.AddressURL("tcp", addr)
 			}
 		}
 	}

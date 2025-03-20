@@ -16,7 +16,7 @@ import (
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/protocol"
-	"github.com/syncthing/syncthing/lib/util"
+	"github.com/syncthing/syncthing/lib/semaphore"
 	"github.com/syncthing/syncthing/lib/versioner"
 )
 
@@ -28,7 +28,7 @@ type receiveEncryptedFolder struct {
 	*sendReceiveFolder
 }
 
-func newReceiveEncryptedFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, ver versioner.Versioner, evLogger events.Logger, ioLimiter *util.Semaphore) service {
+func newReceiveEncryptedFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, ver versioner.Versioner, evLogger events.Logger, ioLimiter *semaphore.Semaphore) service {
 	f := &receiveEncryptedFolder{newSendReceiveFolder(model, fset, ignores, cfg, ver, evLogger, ioLimiter).(*sendReceiveFolder)}
 	f.localFlags = protocol.FlagLocalReceiveOnly // gets propagated to the scanner, and set on locally changed files
 	return f
@@ -56,26 +56,25 @@ func (f *receiveEncryptedFolder) revert() error {
 	defer snap.Release()
 	var iterErr error
 	var dirs []string
-	snap.WithHaveTruncated(protocol.LocalDeviceID, func(intf protocol.FileIntf) bool {
+	snap.WithHaveTruncated(protocol.LocalDeviceID, func(fi protocol.FileInfo) bool {
 		if iterErr = batch.FlushIfFull(); iterErr != nil {
 			return false
 		}
 
-		fit := intf.(db.FileInfoTruncated)
-		if !fit.IsReceiveOnlyChanged() || intf.IsDeleted() {
+		if !fi.IsReceiveOnlyChanged() || fi.IsDeleted() {
 			return true
 		}
 
-		if fit.IsDirectory() {
-			dirs = append(dirs, fit.Name)
+		if fi.IsDirectory() {
+			dirs = append(dirs, fi.Name)
 			return true
 		}
 
-		if err := f.inWritableDir(f.mtimefs.Remove, fit.Name); err != nil && !fs.IsNotExist(err) {
-			f.newScanError(fit.Name, fmt.Errorf("deleting unexpected item: %w", err))
+		if err := f.inWritableDir(f.mtimefs.Remove, fi.Name); err != nil && !fs.IsNotExist(err) {
+			f.newScanError(fi.Name, fmt.Errorf("deleting unexpected item: %w", err))
 		}
 
-		fi := fit.ConvertToDeletedFileInfo(f.shortID)
+		fi.SetDeleted(f.shortID)
 		// Set version to zero, such that we pull the global version in case
 		// this is a valid filename that was erroneously changed locally.
 		// Should already be zero from scanning, but lets be safe.

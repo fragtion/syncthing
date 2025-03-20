@@ -117,7 +117,8 @@ func setupSendReceiveFolder(t testing.TB, files ...protocol.FileInfo) (*testMode
 	model := setupModel(t, w)
 	model.cancel()
 	<-model.stopped
-	f := model.folderRunners[fcfg.ID].(*sendReceiveFolder)
+	r, _ := model.folderRunners.Get(fcfg.ID)
+	f := r.(*sendReceiveFolder)
 	f.tempPullErrors = make(map[string]string)
 	f.ctx = context.Background()
 
@@ -299,7 +300,7 @@ func TestCopierFinder(t *testing.T) {
 	}
 
 	// Verify that the fetched blocks have actually been written to the temp file
-	blks, err := scanner.HashFile(context.TODO(), f.Filesystem(nil), tempFile, protocol.MinBlockSize, nil, false)
+	blks, err := scanner.HashFile(context.TODO(), f.ID, f.Filesystem(nil), tempFile, protocol.MinBlockSize, nil, false)
 	if err != nil {
 		t.Log(err)
 	}
@@ -362,7 +363,7 @@ func TestWeakHash(t *testing.T) {
 		Blocks:     existing,
 		Size:       size,
 		ModifiedS:  info.ModTime().Unix(),
-		ModifiedNs: info.ModTime().Nanosecond(),
+		ModifiedNs: int32(info.ModTime().Nanosecond()),
 	}
 	desiredFile := protocol.FileInfo{
 		Name:      "weakhash",
@@ -811,7 +812,7 @@ func TestCopyOwner(t *testing.T) {
 
 	m, f, wcfgCancel := setupSendReceiveFolder(t)
 	defer wcfgCancel()
-	f.folder.FolderConfiguration = newFolderConfiguration(m.cfg, f.ID, f.Label, fs.FilesystemTypeFake, "/TestCopyOwner")
+	f.folder.FolderConfiguration = newFolderConfiguration(m.cfg, f.ID, f.Label, config.FilesystemTypeFake, "/TestCopyOwner")
 	f.folder.FolderConfiguration.CopyOwnershipFromParent = true
 
 	f.fset = newFileSet(t, f.ID, m.db)
@@ -890,7 +891,7 @@ func TestCopyOwner(t *testing.T) {
 		Name:          "foo/bar/sym",
 		Type:          protocol.FileInfoTypeSymlink,
 		Permissions:   0o644,
-		SymlinkTarget: "over the rainbow",
+		SymlinkTarget: []byte("over the rainbow"),
 	}
 
 	f.handleSymlink(symlink, snap, dbUpdateChan, scanChan)
@@ -957,7 +958,7 @@ func TestSRConflictReplaceFileByLink(t *testing.T) {
 
 	// Simulate remote creating a symlink with the same name
 	file.Type = protocol.FileInfoTypeSymlink
-	file.SymlinkTarget = "bar"
+	file.SymlinkTarget = []byte("bar")
 	rem := device1.Short()
 	file.Version = protocol.Vector{}.Update(rem)
 	file.ModifiedBy = rem
@@ -1100,11 +1101,11 @@ func TestPullCaseOnlyPerformFinish(t *testing.T) {
 	hasCur := false
 	snap := dbSnapshot(t, m, f.ID)
 	defer snap.Release()
-	snap.WithHave(protocol.LocalDeviceID, func(i protocol.FileIntf) bool {
+	snap.WithHave(protocol.LocalDeviceID, func(i protocol.FileInfo) bool {
 		if hasCur {
 			t.Fatal("got more than one file")
 		}
-		cur = i.(protocol.FileInfo)
+		cur = i
 		hasCur = true
 		return true
 	})
@@ -1165,11 +1166,11 @@ func testPullCaseOnlyDirOrSymlink(t *testing.T, dir bool) {
 	hasCur := false
 	snap := dbSnapshot(t, m, f.ID)
 	defer snap.Release()
-	snap.WithHave(protocol.LocalDeviceID, func(i protocol.FileIntf) bool {
+	snap.WithHave(protocol.LocalDeviceID, func(i protocol.FileInfo) bool {
 		if hasCur {
 			t.Fatal("got more than one file")
 		}
-		cur = i.(protocol.FileInfo)
+		cur = i
 		hasCur = true
 		return true
 	})
@@ -1278,7 +1279,7 @@ func TestPullSymlinkOverExistingWindows(t *testing.T) {
 
 	m, f, wcfgCancel := setupSendReceiveFolder(t)
 	defer wcfgCancel()
-	addFakeConn(m, device1, f.ID)
+	conn := addFakeConn(m, device1, f.ID)
 
 	name := "foo"
 	if fd, err := f.mtimefs.Create(name); err != nil {
@@ -1296,7 +1297,7 @@ func TestPullSymlinkOverExistingWindows(t *testing.T) {
 	if !ok {
 		t.Fatal("file missing")
 	}
-	must(t, m.Index(device1, f.ID, []protocol.FileInfo{{Name: name, Type: protocol.FileInfoTypeSymlink, Version: file.Version.Update(device1.Short())}}))
+	must(t, m.Index(conn, &protocol.Index{Folder: f.ID, Files: []protocol.FileInfo{{Name: name, Type: protocol.FileInfoTypeSymlink, Version: file.Version.Update(device1.Short())}}}))
 
 	scanChan := make(chan string)
 

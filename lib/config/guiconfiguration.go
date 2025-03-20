@@ -9,6 +9,7 @@ package config
 import (
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -17,7 +18,25 @@ import (
 	"github.com/syncthing/syncthing/lib/rand"
 )
 
+type GUIConfiguration struct {
+	Enabled                   bool     `json:"enabled" xml:"enabled,attr" default:"true"`
+	RawAddress                string   `json:"address" xml:"address" default:"127.0.0.1:8384"`
+	RawUnixSocketPermissions  string   `json:"unixSocketPermissions" xml:"unixSocketPermissions,omitempty"`
+	User                      string   `json:"user" xml:"user,omitempty"`
+	Password                  string   `json:"password" xml:"password,omitempty"`
+	AuthMode                  AuthMode `json:"authMode" xml:"authMode,omitempty"`
+	RawUseTLS                 bool     `json:"useTLS" xml:"tls,attr"`
+	APIKey                    string   `json:"apiKey" xml:"apikey,omitempty"`
+	InsecureAdminAccess       bool     `json:"insecureAdminAccess" xml:"insecureAdminAccess,omitempty"`
+	Theme                     string   `json:"theme" xml:"theme" default:"default"`
+	Debugging                 bool     `json:"debugging" xml:"debugging,attr"`
+	InsecureSkipHostCheck     bool     `json:"insecureSkipHostcheck" xml:"insecureSkipHostcheck,omitempty"`
+	InsecureAllowFrameLoading bool     `json:"insecureAllowFrameLoading" xml:"insecureAllowFrameLoading,omitempty"`
+	SendBasicAuthPrompt       bool     `json:"sendBasicAuthPrompt" xml:"sendBasicAuthPrompt,attr"`
+}
+
 func (c GUIConfiguration) IsAuthEnabled() bool {
+	// This function should match isAuthEnabled() in syncthingController.js
 	return c.AuthMode == AuthModeLDAP || (len(c.User) > 0 && len(c.Password) > 0)
 }
 
@@ -59,14 +78,12 @@ func (c GUIConfiguration) UnixSocketPermissions() os.FileMode {
 }
 
 func (c GUIConfiguration) Network() string {
-	if override := os.Getenv("STGUIADDRESS"); strings.Contains(override, "/") {
+	if override := os.Getenv("STGUIADDRESS"); override != "" {
 		url, err := url.Parse(override)
-		if err != nil {
-			return "tcp"
-		}
-		if strings.HasPrefix(url.Scheme, "unix") {
+		if err == nil && strings.HasPrefix(url.Scheme, "unix") {
 			return "unix"
 		}
+		return "tcp"
 	}
 	if strings.HasPrefix(c.RawAddress, "/") {
 		return "unix"
@@ -76,19 +93,17 @@ func (c GUIConfiguration) Network() string {
 
 func (c GUIConfiguration) UseTLS() bool {
 	if override := os.Getenv("STGUIADDRESS"); override != "" {
-		if strings.HasPrefix(override, "http") {
-			return strings.HasPrefix(override, "https:")
-		}
-		if strings.HasPrefix(override, "unix") {
-			return strings.HasPrefix(override, "unixs:")
-		}
+		return strings.HasPrefix(override, "https:") || strings.HasPrefix(override, "unixs:")
 	}
 	return c.RawUseTLS
 }
 
 func (c GUIConfiguration) URL() string {
-	if strings.HasPrefix(c.RawAddress, "/") {
-		return "unix://" + c.RawAddress
+	if c.Network() == "unix" {
+		if c.UseTLS() {
+			return "unixs://" + c.Address()
+		}
+		return "unix://" + c.Address()
 	}
 
 	u := url.URL{
@@ -115,9 +130,19 @@ func (c GUIConfiguration) URL() string {
 	return u.String()
 }
 
-// SetHashedPassword hashes the given plaintext password and stores the new hash.
-func (c *GUIConfiguration) HashAndSetPassword(password string) error {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), 0)
+// matches a bcrypt hash and not too much else
+var bcryptExpr = regexp.MustCompile(`^\$2[aby]\$\d+\$.{50,}`)
+
+// SetPassword takes a bcrypt hash or a plaintext password and stores it.
+// Plaintext passwords are hashed. Returns an error if the password is not
+// valid.
+func (c *GUIConfiguration) SetPassword(password string) error {
+	if bcryptExpr.MatchString(password) {
+		// Already hashed
+		c.Password = password
+		return nil
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return err
 	}

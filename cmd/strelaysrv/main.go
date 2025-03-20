@@ -19,19 +19,19 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/syncthing/syncthing/lib/build"
-	"github.com/syncthing/syncthing/lib/events"
-	"github.com/syncthing/syncthing/lib/osutil"
-	"github.com/syncthing/syncthing/lib/relay/protocol"
-	"github.com/syncthing/syncthing/lib/tlsutil"
 	"golang.org/x/time/rate"
 
+	_ "github.com/syncthing/syncthing/lib/automaxprocs"
+	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/config"
+	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/nat"
+	"github.com/syncthing/syncthing/lib/osutil"
 	_ "github.com/syncthing/syncthing/lib/pmp"
-	_ "github.com/syncthing/syncthing/lib/upnp"
-
 	syncthingprotocol "github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/relay/protocol"
+	"github.com/syncthing/syncthing/lib/tlsutil"
+	_ "github.com/syncthing/syncthing/lib/upnp"
 )
 
 var (
@@ -194,7 +194,15 @@ func main() {
 		cfg.Options.NATTimeoutS = natTimeout
 	})
 	natSvc := nat.NewService(id, wrapper)
-	mapping := mapping{natSvc.NewMapping(nat.TCP, addr.IP, addr.Port)}
+	var ipVersion nat.IPVersion
+	if strings.HasSuffix(proto, "4") {
+		ipVersion = nat.IPv4Only
+	} else if strings.HasSuffix(proto, "6") {
+		ipVersion = nat.IPv6Only
+	} else {
+		ipVersion = nat.IPvAny
+	}
+	mapping := mapping{natSvc.NewMapping(nat.TCP, ipVersion, addr.IP, addr.Port)}
 
 	if natEnabled {
 		ctx, cancel := context.WithCancel(context.Background())

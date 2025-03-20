@@ -36,8 +36,6 @@ import (
 	"github.com/syncthing/syncthing/lib/model"
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
-	"github.com/syncthing/syncthing/lib/rand"
-	"github.com/syncthing/syncthing/lib/sha256"
 	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/tlsutil"
 	"github.com/syncthing/syncthing/lib/upgrade"
@@ -54,12 +52,11 @@ const (
 )
 
 type Options struct {
-	AuditWriter      io.Writer
-	DeadlockTimeoutS int
-	NoUpgrade        bool
-	ProfilerAddr     string
-	ResetDeltaIdxs   bool
-	Verbose          bool
+	AuditWriter    io.Writer
+	NoUpgrade      bool
+	ProfilerAddr   string
+	ResetDeltaIdxs bool
+	Verbose        bool
 	// null duration means use default value
 	DBRecheckInterval    time.Duration
 	DBIndirectGCInterval time.Duration
@@ -78,6 +75,9 @@ type App struct {
 	stopOnce          sync.Once
 	mainServiceCancel context.CancelFunc
 	stopped           chan struct{}
+
+	// Access to internals for direct users of this package. Note that the interface in Internals is unstable!
+	Internals *Internals
 }
 
 func New(cfg config.Wrapper, dbBackend backend.Backend, evLogger events.Logger, cert tls.Certificate, opts Options) (*App, error) {
@@ -152,11 +152,6 @@ func (a *App) startup() error {
 	a.myID = protocol.NewDeviceID(a.cert.Certificate[0])
 	l.SetPrefix(fmt.Sprintf("[%s] ", a.myID.String()[:5]))
 	l.Infoln("My ID:", a.myID)
-
-	// Select SHA256 implementation and report. Affected by the
-	// STHASHING environment variable.
-	sha256.SelectAlgo()
-	sha256.Report()
 
 	// Emit the Starting event, now that we know who we are.
 
@@ -249,13 +244,8 @@ func (a *App) startup() error {
 	}
 
 	keyGen := protocol.NewKeyGenerator()
-	m := model.NewModel(a.cfg, a.myID, "syncthing", build.Version, a.ll, protectedFiles, a.evLogger, keyGen)
-
-	if a.opts.DeadlockTimeoutS > 0 {
-		m.StartDeadlockDetector(time.Duration(a.opts.DeadlockTimeoutS) * time.Second)
-	} else if !build.IsRelease || build.IsBeta {
-		m.StartDeadlockDetector(20 * time.Minute)
-	}
+	m := model.NewModel(a.cfg, a.myID, a.ll, protectedFiles, a.evLogger, keyGen)
+	a.Internals = newInternals(m)
 
 	a.mainService.Add(m)
 
@@ -300,11 +290,6 @@ func (a *App) startup() error {
 				// Unique ID will be set and config saved below if necessary.
 			}
 		}
-
-		// If we are going to do usage reporting, ensure we have a valid unique ID.
-		if cfg.Options.URAccepted > 0 && cfg.Options.URUniqueID == "" {
-			cfg.Options.URUniqueID = rand.String(8)
-		}
 	})
 
 	usageReportingSvc := ur.New(a.cfg, m, connectionsService, a.opts.NoUpgrade)
@@ -312,7 +297,7 @@ func (a *App) startup() error {
 
 	// GUI
 
-	if err := a.setupGUI(m, defaultSub, diskSub, discoveryManager, connectionsService, usageReportingSvc, errors, systemLog); err != nil {
+	if err := a.setupGUI(m, defaultSub, diskSub, discoveryManager, connectionsService, usageReportingSvc, errors, systemLog, miscDB); err != nil {
 		l.Warnln("Failed starting API:", err)
 		return err
 	}
@@ -414,7 +399,7 @@ func (a *App) stopWithErr(stopReason svcutil.ExitStatus, err error) svcutil.Exit
 	return a.exitStatus
 }
 
-func (a *App) setupGUI(m model.Model, defaultSub, diskSub events.BufferedSubscription, discoverer discover.Manager, connectionsService connections.Service, urService *ur.Service, errors, systemLog logger.Recorder) error {
+func (a *App) setupGUI(m model.Model, defaultSub, diskSub events.BufferedSubscription, discoverer discover.Manager, connectionsService connections.Service, urService *ur.Service, errors, systemLog logger.Recorder, miscDB *db.NamespacedKV) error {
 	guiCfg := a.cfg.GUI()
 
 	if !guiCfg.Enabled {
@@ -428,7 +413,7 @@ func (a *App) setupGUI(m model.Model, defaultSub, diskSub events.BufferedSubscri
 	summaryService := model.NewFolderSummaryService(a.cfg, m, a.myID, a.evLogger)
 	a.mainService.Add(summaryService)
 
-	apiSvc := api.New(a.myID, a.cfg, locations.Get(locations.GUIAssets), tlsDefaultCommonName, m, defaultSub, diskSub, a.evLogger, discoverer, connectionsService, urService, summaryService, errors, systemLog, a.opts.NoUpgrade)
+	apiSvc := api.New(a.myID, a.cfg, locations.Get(locations.GUIAssets), tlsDefaultCommonName, m, defaultSub, diskSub, a.evLogger, discoverer, connectionsService, urService, summaryService, errors, systemLog, a.opts.NoUpgrade, miscDB)
 	a.mainService.Add(apiSvc)
 
 	if err := apiSvc.WaitForStart(); err != nil {

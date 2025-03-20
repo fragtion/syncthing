@@ -39,7 +39,7 @@ func expectEvent(w events.Subscription, t *testing.T, size int) {
 	if event.Type != events.DownloadProgress {
 		t.Fatal("Unexpected event:", event, "at", caller(1))
 	}
-	data := event.Data.(map[string]map[string]*pullerProgress)
+	data := event.Data.(map[string]map[string]*PullerProgress)
 	if len(data) != size {
 		t.Fatal("Unexpected event data size:", data, "at", caller(1))
 	}
@@ -91,7 +91,7 @@ func TestProgressEmitter(t *testing.T) {
 	expectEvent(w, t, 1)
 	expectTimeout(w, t)
 
-	s.copiedFromOrigin()
+	s.copiedFromOrigin(1)
 
 	expectEvent(w, t, 1)
 	expectTimeout(w, t)
@@ -463,7 +463,7 @@ func TestSendDownloadProgressMessages(t *testing.T) {
 	p.temporaryIndexUnsubscribe(fc)
 
 	sendMsgs(p)
-	_, ok := p.sentDownloadStates[fc.ID()]
+	_, ok := p.sentDownloadStates[fc.DeviceID()]
 	if ok {
 		t.Error("Should not be there")
 	}

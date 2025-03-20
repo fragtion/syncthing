@@ -24,10 +24,11 @@ import (
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/scanner"
+	"github.com/syncthing/syncthing/lib/semaphore"
 	"github.com/syncthing/syncthing/lib/stats"
+	"github.com/syncthing/syncthing/lib/stringutil"
 	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/sync"
-	"github.com/syncthing/syncthing/lib/util"
 	"github.com/syncthing/syncthing/lib/versioner"
 	"github.com/syncthing/syncthing/lib/watchaggregator"
 )
@@ -39,7 +40,7 @@ type folder struct {
 	stateTracker
 	config.FolderConfiguration
 	*stats.FolderStatisticsReference
-	ioLimiter *util.Semaphore
+	ioLimiter *semaphore.Semaphore
 
 	localFlags uint32
 
@@ -95,7 +96,7 @@ type puller interface {
 	pull() (bool, error) // true when successful and should not be retried
 }
 
-func newFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, evLogger events.Logger, ioLimiter *util.Semaphore, ver versioner.Versioner) folder {
+func newFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, evLogger events.Logger, ioLimiter *semaphore.Semaphore, ver versioner.Versioner) folder {
 	f := folder{
 		stateTracker:              newStateTracker(cfg.ID, evLogger),
 		FolderConfiguration:       cfg,
@@ -137,6 +138,9 @@ func newFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg conf
 	f.pullPause = f.pullBasePause()
 	f.pullFailTimer = time.NewTimer(0)
 	<-f.pullFailTimer.C
+
+	registerFolderMetrics(f.ID)
+
 	return f
 }
 
@@ -368,7 +372,7 @@ func (f *folder) pull() (success bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	snap.WithNeed(protocol.LocalDeviceID, func(intf protocol.FileIntf) bool {
+	snap.WithNeed(protocol.LocalDeviceID, func(intf protocol.FileInfo) bool {
 		abort = false
 		return false
 	})
@@ -423,7 +427,7 @@ func (f *folder) pull() (success bool, err error) {
 
 	// Pulling failed, try again later.
 	delay := f.pullPause + time.Since(startTime)
-	l.Infof("Folder %v isn't making sync progress - retrying in %v.", f.Description(), util.NiceDurationString(delay))
+	l.Infof("Folder %v isn't making sync progress - retrying in %v.", f.Description(), stringutil.NiceDurationString(delay))
 	f.pullFailTimer.Reset(delay)
 
 	return false, err
@@ -458,6 +462,11 @@ func (f *folder) scanSubdirs(subDirs []string) error {
 		return err
 	}
 	defer f.ioLimiter.Give(1)
+
+	metricFolderScans.WithLabelValues(f.ID).Inc()
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	go addTimeUntilCancelled(ctx, metricFolderScanSeconds.WithLabelValues(f.ID))
 
 	for i := range subDirs {
 		sub := osutil.NativeFilename(subDirs[i])
@@ -693,7 +702,7 @@ func (f *folder) scanSubdirsChangedAndNew(subDirs []string, batch *scanBatch) (i
 }
 
 func (f *folder) scanSubdirsDeletedAndIgnored(subDirs []string, batch *scanBatch) (int, error) {
-	var toIgnore []db.FileInfoTruncated
+	var toIgnore []protocol.FileInfo
 	ignoredParent := ""
 	changes := 0
 	snap, err := f.dbSnapshot()
@@ -705,24 +714,23 @@ func (f *folder) scanSubdirsDeletedAndIgnored(subDirs []string, batch *scanBatch
 	for _, sub := range subDirs {
 		var iterError error
 
-		snap.WithPrefixedHaveTruncated(protocol.LocalDeviceID, sub, func(fi protocol.FileIntf) bool {
+		snap.WithPrefixedHaveTruncated(protocol.LocalDeviceID, sub, func(fi protocol.FileInfo) bool {
 			select {
 			case <-f.ctx.Done():
 				return false
 			default:
 			}
 
-			file := fi.(db.FileInfoTruncated)
-
 			if err := batch.FlushIfFull(); err != nil {
 				iterError = err
 				return false
 			}
 
-			if ignoredParent != "" && !fs.IsParent(file.Name, ignoredParent) {
+			if ignoredParent != "" && !fs.IsParent(fi.Name, ignoredParent) {
 				for _, file := range toIgnore {
 					l.Debugln("marking file as ignored", file)
-					nf := file.ConvertToIgnoredFileInfo()
+					nf := file
+					nf.SetIgnored()
 					if batch.Update(nf, snap) {
 						changes++
 					}
@@ -735,38 +743,39 @@ func (f *folder) scanSubdirsDeletedAndIgnored(subDirs []string, batch *scanBatch
 				ignoredParent = ""
 			}
 
-			switch ignored := f.ignores.Match(file.Name).IsIgnored(); {
-			case file.IsIgnored() && ignored:
+			switch ignored := f.ignores.Match(fi.Name).IsIgnored(); {
+			case fi.IsIgnored() && ignored:
 				return true
-			case !file.IsIgnored() && ignored:
+			case !fi.IsIgnored() && ignored:
 				// File was not ignored at last pass but has been ignored.
-				if file.IsDirectory() {
+				if fi.IsDirectory() {
 					// Delay ignoring as a child might be unignored.
-					toIgnore = append(toIgnore, file)
+					toIgnore = append(toIgnore, fi)
 					if ignoredParent == "" {
 						// If the parent wasn't ignored already, set
 						// this path as the "highest" ignored parent
-						ignoredParent = file.Name
+						ignoredParent = fi.Name
 					}
 					return true
 				}
 
-				l.Debugln("marking file as ignored", file)
-				nf := file.ConvertToIgnoredFileInfo()
+				l.Debugln("marking file as ignored", fi)
+				nf := fi
+				nf.SetIgnored()
 				if batch.Update(nf, snap) {
 					changes++
 				}
 
-			case file.IsIgnored() && !ignored:
+			case fi.IsIgnored() && !ignored:
 				// Successfully scanned items are already un-ignored during
 				// the scan, so check whether it is deleted.
 				fallthrough
-			case !file.IsIgnored() && !file.IsDeleted() && !file.IsUnsupported():
+			case !fi.IsIgnored() && !fi.IsDeleted() && !fi.IsUnsupported():
 				// The file is not ignored, deleted or unsupported. Lets check if
 				// it's still here. Simply stat:ing it won't do as there are
 				// tons of corner cases (e.g. parent dir->symlink, missing
 				// permissions)
-				if !osutil.IsDeleted(f.mtimefs, file.Name) {
+				if !osutil.IsDeleted(f.mtimefs, fi.Name) {
 					if ignoredParent != "" {
 						// Don't ignore parents of this not ignored item
 						toIgnore = toIgnore[:0]
@@ -774,9 +783,10 @@ func (f *folder) scanSubdirsDeletedAndIgnored(subDirs []string, batch *scanBatch
 					}
 					return true
 				}
-				nf := file.ConvertToDeletedFileInfo(f.shortID)
+				nf := fi
+				nf.SetDeleted(f.shortID)
 				nf.LocalFlags = f.localFlags
-				if file.ShouldConflict() {
+				if fi.ShouldConflict() {
 					// We do not want to override the global version with
 					// the deleted file. Setting to an empty version makes
 					// sure the file gets in sync on the following pull.
@@ -786,30 +796,30 @@ func (f *folder) scanSubdirsDeletedAndIgnored(subDirs []string, batch *scanBatch
 				if batch.Update(nf, snap) {
 					changes++
 				}
-			case file.IsDeleted() && file.IsReceiveOnlyChanged():
+			case fi.IsDeleted() && fi.IsReceiveOnlyChanged():
 				switch f.Type {
 				case config.FolderTypeReceiveOnly, config.FolderTypeReceiveEncrypted:
-					switch gf, ok := snap.GetGlobal(file.Name); {
+					switch gf, ok := snap.GetGlobal(fi.Name); {
 					case !ok:
 					case gf.IsReceiveOnlyChanged():
-						l.Debugln("removing deleted, receive-only item that is globally receive-only from db", file)
-						batch.Remove(file.Name)
+						l.Debugln("removing deleted, receive-only item that is globally receive-only from db", fi)
+						batch.Remove(fi.Name)
 						changes++
 					case gf.IsDeleted():
 						// Our item is deleted and the global item is deleted too. We just
 						// pretend it is a normal deleted file (nobody cares about that).
-						l.Debugf("%v scanning: Marking globally deleted item as not locally changed: %v", f, file.Name)
-						file.LocalFlags &^= protocol.FlagLocalReceiveOnly
-						if batch.Update(file.ConvertDeletedToFileInfo(), snap) {
+						l.Debugf("%v scanning: Marking globally deleted item as not locally changed: %v", f, fi.Name)
+						fi.LocalFlags &^= protocol.FlagLocalReceiveOnly
+						if batch.Update(fi, snap) {
 							changes++
 						}
 					}
 				default:
 					// No need to bump the version for a file that was and is
 					// deleted and just the folder type/local flags changed.
-					file.LocalFlags &^= protocol.FlagLocalReceiveOnly
-					l.Debugln("removing receive-only flag on deleted item", file)
-					if batch.Update(file.ConvertDeletedToFileInfo(), snap) {
+					fi.LocalFlags &^= protocol.FlagLocalReceiveOnly
+					l.Debugln("removing receive-only flag on deleted item", fi)
+					if batch.Update(fi, snap) {
 						changes++
 					}
 				}
@@ -826,8 +836,9 @@ func (f *folder) scanSubdirsDeletedAndIgnored(subDirs []string, batch *scanBatch
 
 		if iterError == nil && len(toIgnore) > 0 {
 			for _, file := range toIgnore {
-				l.Debugln("marking file as ignored", f)
-				nf := file.ConvertToIgnoredFileInfo()
+				l.Debugln("marking file as ignored", file)
+				nf := file
+				nf.SetIgnored()
 				if batch.Update(nf, snap) {
 					changes++
 				}
@@ -854,9 +865,7 @@ func (f *folder) findRename(snap *db.Snapshot, file protocol.FileInfo, alreadyUs
 	found := false
 	nf := protocol.FileInfo{}
 
-	snap.WithBlocksHash(file.BlocksHash, func(ifi protocol.FileIntf) bool {
-		fi := ifi.(protocol.FileInfo)
-
+	snap.WithBlocksHash(file.BlocksHash, func(fi protocol.FileInfo) bool {
 		select {
 		case <-f.ctx.Done():
 			return false
@@ -1056,7 +1065,7 @@ func (f *folder) monitorWatch(ctx context.Context) {
 		case ev := <-summaryChan:
 			if data, ok := ev.Data.(FolderSummaryEventData); !ok {
 				f.evLogger.Log(events.Failure, "Unexpected type of folder-summary event in folder.monitorWatch")
-			} else if data.Summary.LocalTotalItems-data.Summary.LocalDeleted > kqueueItemCountThreshold {
+			} else if data.Folder == f.folderID && data.Summary.LocalTotalItems-data.Summary.LocalDeleted > kqueueItemCountThreshold {
 				f.warnedKqueue = true
 				summarySub.Unsubscribe()
 				summaryChan = nil

@@ -1,22 +1,31 @@
-// Copyright (C) 2014 The Protocol Authors.
+// Copyright (C) 2014 The Syncthing Authors.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this file,
+// You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package protocol
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base32"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/syncthing/syncthing/lib/sha256"
 )
 
-const DeviceIDLength = 32
+const (
+	DeviceIDLength = 32
+	// keep consistent with shortIDStringLength in gui/default/syncthing/app.js
+	ShortIDStringLength = 7
+)
 
-type DeviceID [DeviceIDLength]byte
-type ShortID uint64
+type (
+	DeviceID [DeviceIDLength]byte
+	ShortID  uint64
+)
 
 var (
 	LocalDeviceID  = repeatedDeviceID(0xff)
@@ -31,17 +40,22 @@ func repeatedDeviceID(v byte) (d DeviceID) {
 	return
 }
 
-// NewDeviceID generates a new device ID from the raw bytes of a certificate
+// NewDeviceID generates a new device ID from SHA256 hash of the given piece
+// of data (usually raw certificate bytes).
 func NewDeviceID(rawCert []byte) DeviceID {
 	return DeviceID(sha256.Sum256(rawCert))
 }
 
+// DeviceIDFromString parses a device ID from a string. The string is expected
+// to be in the canonical format, with check digits.
 func DeviceIDFromString(s string) (DeviceID, error) {
 	var n DeviceID
 	err := n.UnmarshalText([]byte(s))
 	return n, err
 }
 
+// DeviceIDFromBytes converts a 32 byte slice to a DeviceID. A slice of the
+// wrong length results in an error.
 func DeviceIDFromBytes(bs []byte) (DeviceID, error) {
 	var n DeviceID
 	if len(bs) != len(n) {
@@ -94,7 +108,7 @@ func (s ShortID) String() string {
 	}
 	var bs [8]byte
 	binary.BigEndian.PutUint64(bs[:], uint64(s))
-	return base32.StdEncoding.EncodeToString(bs[:])[:7]
+	return base32.StdEncoding.EncodeToString(bs[:])[:ShortIDStringLength]
 }
 
 func (n *DeviceID) UnmarshalText(bs []byte) error {

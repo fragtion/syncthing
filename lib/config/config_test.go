@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/d4l3k/messagediff"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/events"
@@ -99,7 +100,7 @@ func TestDefaultValues(t *testing.T) {
 		},
 		Defaults: Defaults{
 			Folder: FolderConfiguration{
-				FilesystemType:   fs.FilesystemTypeBasic,
+				FilesystemType:   FilesystemTypeBasic,
 				Path:             "~",
 				Type:             FolderTypeSendReceive,
 				Devices:          []FolderDeviceConfiguration{{DeviceID: device1}},
@@ -126,7 +127,7 @@ func TestDefaultValues(t *testing.T) {
 			Device: DeviceConfiguration{
 				Addresses:       []string{"dynamic"},
 				AllowedNetworks: []string{},
-				Compression:     protocol.CompressionMetadata,
+				Compression:     CompressionMetadata,
 				IgnoredFolders:  []ObservedFolder{},
 			},
 			Ignores: Ignores{
@@ -174,7 +175,7 @@ func TestDeviceConfig(t *testing.T) {
 		expectedFolders := []FolderConfiguration{
 			{
 				ID:               "test",
-				FilesystemType:   fs.FilesystemTypeBasic,
+				FilesystemType:   FilesystemTypeBasic,
 				Path:             "testdata",
 				Devices:          []FolderDeviceConfiguration{{DeviceID: device1}, {DeviceID: device4}},
 				Type:             FolderTypeSendOnly,
@@ -204,7 +205,7 @@ func TestDeviceConfig(t *testing.T) {
 				DeviceID:        device1,
 				Name:            "node one",
 				Addresses:       []string{"tcp://a"},
-				Compression:     protocol.CompressionMetadata,
+				Compression:     CompressionMetadata,
 				AllowedNetworks: []string{},
 				IgnoredFolders:  []ObservedFolder{},
 			},
@@ -212,7 +213,7 @@ func TestDeviceConfig(t *testing.T) {
 				DeviceID:        device4,
 				Name:            "node two",
 				Addresses:       []string{"tcp://b"},
-				Compression:     protocol.CompressionMetadata,
+				Compression:     CompressionMetadata,
 				AllowedNetworks: []string{},
 				IgnoredFolders:  []ObservedFolder{},
 			},
@@ -304,6 +305,11 @@ func TestOverriddenValues(t *testing.T) {
 		t.Error(err)
 	}
 
+	if cfg.Options().URUniqueID == "" {
+		t.Error("expected usage reporting unique ID to be set since usage reporting is enabled")
+	}
+	expected.URUniqueID = cfg.Options().URUniqueID // it's random
+
 	if diff, equal := messagediff.PrettyDiff(expected, cfg.Options()); !equal {
 		t.Errorf("Overridden config differs. Diff:\n%s", diff)
 	}
@@ -338,7 +344,7 @@ func TestDeviceAddressesDynamic(t *testing.T) {
 			DeviceID:        device4,
 			Name:            name, // Set when auto created
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressionMetadata,
+			Compression:     CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
 		},
@@ -362,21 +368,21 @@ func TestDeviceCompression(t *testing.T) {
 		device1: {
 			DeviceID:        device1,
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressionMetadata,
+			Compression:     CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
 		},
 		device2: {
 			DeviceID:        device2,
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressionMetadata,
+			Compression:     CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
 		},
 		device3: {
 			DeviceID:        device3,
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressionNever,
+			Compression:     CompressionNever,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
 		},
@@ -384,7 +390,7 @@ func TestDeviceCompression(t *testing.T) {
 			DeviceID:        device4,
 			Name:            name, // Set when auto created
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressionMetadata,
+			Compression:     CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
 		},
@@ -427,7 +433,7 @@ func TestDeviceAddressesStatic(t *testing.T) {
 			DeviceID:        device4,
 			Name:            name, // Set when auto created
 			Addresses:       []string{"dynamic"},
-			Compression:     protocol.CompressionMetadata,
+			Compression:     CompressionMetadata,
 			AllowedNetworks: []string{},
 			IgnoredFolders:  []ObservedFolder{},
 		},
@@ -550,7 +556,7 @@ func TestFolderCheckPath(t *testing.T) {
 
 	for _, testcase := range testcases {
 		cfg := FolderConfiguration{
-			FilesystemType: fs.FilesystemTypeFake,
+			FilesystemType: FilesystemTypeFake,
 			MarkerName:     DefaultMarkerName,
 		}
 
@@ -773,8 +779,9 @@ func TestGUIConfigURL(t *testing.T) {
 func TestGUIPasswordHash(t *testing.T) {
 	var c GUIConfiguration
 
+	// Setting a plaintext password should work
 	testPass := "pass"
-	if err := c.HashAndSetPassword(testPass); err != nil {
+	if err := c.SetPassword(testPass); err != nil {
 		t.Fatal(err)
 	}
 	if c.Password == testPass {
@@ -788,6 +795,16 @@ func TestGUIPasswordHash(t *testing.T) {
 	failPass := "different"
 	if err := c.CompareHashedPassword(failPass); err == nil {
 		t.Errorf("Match on different password: %v", err)
+	}
+
+	// Setting a bcrypt hash directly should also work
+	hash, err := bcrypt.GenerateFromPassword([]byte("test"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetPassword(string(hash))
+	if err := c.CompareHashedPassword("test"); err != nil {
+		t.Errorf("No match on hashed password: %v", err)
 	}
 }
 
@@ -1264,7 +1281,7 @@ func adjustDeviceConfiguration(cfg *DeviceConfiguration, id protocol.DeviceID, n
 func adjustFolderConfiguration(cfg *FolderConfiguration, id, label string, fsType fs.FilesystemType, path string) {
 	cfg.ID = id
 	cfg.Label = label
-	cfg.FilesystemType = fsType
+	cfg.FilesystemType = FilesystemType(fsType)
 	cfg.Path = path
 }
 
@@ -1596,4 +1613,62 @@ func handleFile(name string) {
 	origin, _ := os.ReadFile(filepath.Join("testdata", name))
 	fd.Write(origin)
 	fd.Close()
+}
+
+func TestCopyMatching(t *testing.T) {
+	type Nested struct {
+		A int
+	}
+	type Test struct {
+		CopyA  int
+		CopyB  []string
+		CopyC  Nested
+		CopyD  *Nested
+		NoCopy int `restart:"true"`
+	}
+
+	from := Test{
+		CopyA: 1,
+		CopyB: []string{"friend", "foe"},
+		CopyC: Nested{
+			A: 2,
+		},
+		CopyD: &Nested{
+			A: 3,
+		},
+		NoCopy: 4,
+	}
+
+	to := Test{
+		CopyA: 11,
+		CopyB: []string{"foot", "toe"},
+		CopyC: Nested{
+			A: 22,
+		},
+		CopyD: &Nested{
+			A: 33,
+		},
+		NoCopy: 44,
+	}
+
+	// Copy empty fields
+	copyMatchingTag(&from, &to, "restart", func(v string) bool {
+		return v != "true"
+	})
+
+	if to.CopyA != 1 {
+		t.Error("CopyA")
+	}
+	if len(to.CopyB) != 2 || to.CopyB[0] != "friend" || to.CopyB[1] != "foe" {
+		t.Error("CopyB")
+	}
+	if to.CopyC.A != 2 {
+		t.Error("CopyC")
+	}
+	if to.CopyD.A != 3 {
+		t.Error("CopyC")
+	}
+	if to.NoCopy != 44 {
+		t.Error("NoCopy")
+	}
 }

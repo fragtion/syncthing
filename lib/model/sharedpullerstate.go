@@ -12,6 +12,9 @@ import (
 	"io"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	"github.com/syncthing/syncthing/internal/protoutil"
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -75,7 +78,7 @@ func newSharedPullerState(file protocol.FileInfo, fs fs.Filesystem, folderID, te
 }
 
 // A momentary state representing the progress of the puller
-type pullerProgress struct {
+type PullerProgress struct {
 	Total                   int   `json:"total"`
 	Reused                  int   `json:"reused"`
 	CopiedFromOrigin        int   `json:"copiedFromOrigin"`
@@ -152,11 +155,11 @@ func (s *sharedPullerState) tempFileInWritableDir(_ string) error {
 	// permissions will be set to the final value later, but in the meantime
 	// we don't want to have a temporary file with looser permissions than
 	// the final outcome.
-	mode := fs.FileMode(s.file.Permissions) | 0600
+	mode := fs.FileMode(s.file.Permissions) | 0o600
 	if s.ignorePerms {
 		// When ignorePerms is set we use a very permissive mode and let the
 		// system umask filter it.
-		mode = 0666
+		mode = 0o666
 	}
 
 	// Attempt to create the temp file
@@ -261,19 +264,34 @@ func (s *sharedPullerState) copyDone(block protocol.BlockInfo) {
 	s.mut.Unlock()
 }
 
-func (s *sharedPullerState) copiedFromOrigin() {
+func (s *sharedPullerState) copiedFromOrigin(bytes int) {
 	s.mut.Lock()
 	s.copyOrigin++
 	s.updated = time.Now()
 	s.mut.Unlock()
+	metricFolderProcessedBytesTotal.WithLabelValues(s.folder, metricSourceLocalOrigin).Add(float64(bytes))
 }
 
-func (s *sharedPullerState) copiedFromOriginShifted() {
+func (s *sharedPullerState) copiedFromElsewhere(bytes int) {
+	metricFolderProcessedBytesTotal.WithLabelValues(s.folder, metricSourceLocalOther).Add(float64(bytes))
+}
+
+func (s *sharedPullerState) skippedSparseBlock(bytes int) {
+	// pretend we copied it, historical
+	s.mut.Lock()
+	s.copyOrigin++
+	s.updated = time.Now()
+	s.mut.Unlock()
+	metricFolderProcessedBytesTotal.WithLabelValues(s.folder, metricSourceSkipped).Add(float64(bytes))
+}
+
+func (s *sharedPullerState) copiedFromOriginShifted(bytes int) {
 	s.mut.Lock()
 	s.copyOrigin++
 	s.copyOriginShifted++
 	s.updated = time.Now()
 	s.mut.Unlock()
+	metricFolderProcessedBytesTotal.WithLabelValues(s.folder, metricSourceLocalShifted).Add(float64(bytes))
 }
 
 func (s *sharedPullerState) pullStarted() {
@@ -295,6 +313,7 @@ func (s *sharedPullerState) pullDone(block protocol.BlockInfo) {
 	s.availableUpdated = time.Now()
 	l.Debugln("sharedPullerState", s.folder, s.file.Name, "pullNeeded done ->", s.pullNeeded)
 	s.mut.Unlock()
+	metricFolderProcessedBytesTotal.WithLabelValues(s.folder, metricSourceNetwork).Add(float64(block.Size))
 }
 
 // finalClose atomically closes and returns closed status of a file. A true
@@ -370,7 +389,7 @@ func writeEncryptionTrailer(file protocol.FileInfo, writer io.WriterAt) (int64, 
 
 	trailerSize := encryptionTrailerSize(wireFile)
 	bs := make([]byte, trailerSize)
-	n, err := wireFile.MarshalTo(bs)
+	n, err := protoutil.MarshalTo(bs, wireFile.ToWire(false))
 	if err != nil {
 		return 0, err
 	}
@@ -385,17 +404,17 @@ func writeEncryptionTrailer(file protocol.FileInfo, writer io.WriterAt) (int64, 
 }
 
 func encryptionTrailerSize(file protocol.FileInfo) int64 {
-	return int64(file.ProtoSize()) + 4
+	return int64(proto.Size(file.ToWire(false))) + 4 // XXX: Inefficient
 }
 
 // Progress returns the momentarily progress for the puller
-func (s *sharedPullerState) Progress() *pullerProgress {
+func (s *sharedPullerState) Progress() *PullerProgress {
 	s.mut.RLock()
 	defer s.mut.RUnlock()
 	total := s.reused + s.copyTotal + s.pullTotal
 	done := total - s.copyNeeded - s.pullNeeded
 	file := len(s.file.Blocks)
-	return &pullerProgress{
+	return &PullerProgress{
 		Total:               total,
 		Reused:              s.reused,
 		CopiedFromOrigin:    s.copyOrigin,

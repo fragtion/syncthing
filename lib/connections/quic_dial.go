@@ -52,27 +52,23 @@ func (d *quicDialer) Dial(ctx context.Context, _ protocol.DeviceID, uri *url.URL
 		return internalConn{}, err
 	}
 
-	var conn net.PacketConn
-	// We need to track who created the conn.
-	// Given we always pass the connection to quic, it assumes it's a remote connection it never closes it,
-	// So our wrapper around it needs to close it, but it only needs to close it if it's not the listening connection.
+	// If we created the conn we need to close it at the end. If we got a
+	// Transport from the registry we have no conn to close.
 	var createdConn net.PacketConn
-	listenConn := d.registry.Get(uri.Scheme, packetConnUnspecified)
-	if listenConn != nil {
-		conn = listenConn.(net.PacketConn)
-	} else {
+	transport, _ := d.registry.Get(uri.Scheme, transportConnUnspecified).(*quic.Transport)
+	if transport == nil {
 		if packetConn, err := net.ListenPacket("udp", ":0"); err != nil {
 			return internalConn{}, err
 		} else {
-			conn = packetConn
 			createdConn = packetConn
+			transport = &quic.Transport{Conn: packetConn}
 		}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, quicOperationTimeout)
 	defer cancel()
 
-	session, err := quic.DialContext(ctx, conn, addr, uri.Host, d.tlsCfg, quicConfig)
+	session, err := transport.Dial(ctx, addr, d.tlsCfg, quicConfig)
 	if err != nil {
 		if createdConn != nil {
 			_ = createdConn.Close()
@@ -95,6 +91,7 @@ func (d *quicDialer) Dial(ctx context.Context, _ protocol.DeviceID, uri *url.URL
 	if isLocal {
 		priority = d.lanPriority
 	}
+
 	return newInternalConn(&quicTlsConn{session, stream, createdConn}, connTypeQUICClient, isLocal, priority), nil
 }
 
@@ -112,9 +109,10 @@ func (quicDialerFactory) New(opts config.OptionsConfiguration, tlsCfg *tls.Confi
 		commonDialer: commonDialer{
 			reconnectInterval: time.Duration(quicInterval) * time.Second,
 			tlsCfg:            tlsCfg,
+			lanChecker:        lanChecker,
 			lanPriority:       opts.ConnectionPriorityQUICLAN,
 			wanPriority:       opts.ConnectionPriorityQUICWAN,
-			lanChecker:        lanChecker,
+			allowsMultiConns:  true,
 		},
 		registry: registry,
 	}

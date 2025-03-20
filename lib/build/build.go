@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+const Codename = "Gold Grasshopper"
+
 var (
 	// Injected by build script
 	Version = "unknown-dev"
@@ -25,9 +27,6 @@ var (
 	User    = "unknown"
 	Stamp   = "0"
 	Tags    = ""
-
-	// Static
-	Codename = "Fermium Flea"
 
 	// Set by init()
 	Date        time.Time
@@ -37,11 +36,10 @@ var (
 	LongVersion string
 	Extra       string
 
-	allowedVersionExp = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[a-z0-9]+)*(\.\d+)*(\+\d+-g[0-9a-f]+)?(-[^\s]+)?$`)
+	allowedVersionExp = regexp.MustCompile(`^v\d+\.\d+\.\d+(-[a-z0-9]+)*(\.\d+)*(\+\d+-g[0-9a-f]+|\+[0-9a-z]+)?(-[^\s]+)?$`)
 
 	envTags = []string{
 		"STGUIASSETS",
-		"STHASHING",
 		"STNORESTART",
 		"STNOUPGRADE",
 	}

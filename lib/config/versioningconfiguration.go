@@ -11,17 +11,29 @@ import (
 	"encoding/xml"
 	"sort"
 
-	"github.com/syncthing/syncthing/lib/fs"
-	"github.com/syncthing/syncthing/lib/util"
+	"github.com/syncthing/syncthing/lib/structutil"
 )
+
+// VersioningConfiguration is used in the code and for JSON serialization
+type VersioningConfiguration struct {
+	Type             string            `json:"type" xml:"type,attr"`
+	Params           map[string]string `json:"params" xml:"parameter" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
+	CleanupIntervalS int               `json:"cleanupIntervalS" xml:"cleanupIntervalS" default:"3600"`
+	FSPath           string            `json:"fsPath" xml:"fsPath"`
+	FSType           FilesystemType    `json:"fsType" xml:"fsType"`
+}
+
+func (c *VersioningConfiguration) Reset() {
+	*c = VersioningConfiguration{}
+}
 
 // internalVersioningConfiguration is used in XML serialization
 type internalVersioningConfiguration struct {
-	Type             string            `xml:"type,attr,omitempty"`
-	Params           []internalParam   `xml:"param"`
-	CleanupIntervalS int               `xml:"cleanupIntervalS" default:"3600"`
-	FSPath           string            `xml:"fsPath"`
-	FSType           fs.FilesystemType `xml:"fsType"`
+	Type             string          `xml:"type,attr,omitempty"`
+	Params           []internalParam `xml:"param"`
+	CleanupIntervalS int             `xml:"cleanupIntervalS" default:"3600"`
+	FSPath           string          `xml:"fsPath"`
+	FSType           FilesystemType  `xml:"fsType"`
 }
 
 type internalParam struct {
@@ -39,7 +51,7 @@ func (c VersioningConfiguration) Copy() VersioningConfiguration {
 }
 
 func (c *VersioningConfiguration) UnmarshalJSON(data []byte) error {
-	util.SetDefaults(c)
+	structutil.SetDefaults(c)
 	type noCustomUnmarshal VersioningConfiguration
 	ptr := (*noCustomUnmarshal)(c)
 	return json.Unmarshal(data, ptr)
@@ -47,7 +59,7 @@ func (c *VersioningConfiguration) UnmarshalJSON(data []byte) error {
 
 func (c *VersioningConfiguration) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	var intCfg internalVersioningConfiguration
-	util.SetDefaults(&intCfg)
+	structutil.SetDefaults(&intCfg)
 	if err := d.DecodeElement(&intCfg, &start); err != nil {
 		return err
 	}

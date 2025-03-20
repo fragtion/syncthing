@@ -4,14 +4,15 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at http://mozilla.org/MPL/2.0/.
 
-//go:build go1.15 && !noquic
-// +build go1.15,!noquic
+//go:build !noquic
+// +build !noquic
 
 package connections
 
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/url"
 	"sync"
@@ -95,17 +96,24 @@ func (t *quicListener) serve(ctx context.Context) error {
 		l.Infoln("Listen (BEP/quic):", err)
 		return err
 	}
-	defer func() { _ = udpConn.Close() }()
+	defer udpConn.Close()
 
-	svc, conn := stun.New(t.cfg, t, udpConn)
-	defer conn.Close()
+	tracer := &writeTrackingTracer{}
+	quicTransport := &quic.Transport{
+		Conn:   udpConn,
+		Tracer: tracer.loggingTracer(),
+	}
+	defer quicTransport.Close()
 
-	go svc.Serve(ctx)
+	svc := stun.New(t.cfg, t, &transportPacketConn{tran: quicTransport}, tracer)
+	stunCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go svc.Serve(stunCtx)
 
-	t.registry.Register(t.uri.Scheme, conn)
-	defer t.registry.Unregister(t.uri.Scheme, conn)
+	t.registry.Register(t.uri.Scheme, quicTransport)
+	defer t.registry.Unregister(t.uri.Scheme, quicTransport)
 
-	listener, err := quic.Listen(conn, t.tlsCfg, quicConfig)
+	listener, err := quicTransport.Listen(t.tlsCfg, quicConfig)
 	if err != nil {
 		l.Infoln("Listen (BEP/quic):", err)
 		return err
@@ -138,7 +146,7 @@ func (t *quicListener) serve(ctx context.Context) error {
 		}
 
 		session, err := listener.Accept(ctx)
-		if err == context.Canceled {
+		if errors.Is(err, context.Canceled) {
 			return nil
 		} else if err != nil {
 			l.Infoln("Listen (BEP/quic): Accepting connection:", err)

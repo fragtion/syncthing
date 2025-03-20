@@ -15,7 +15,7 @@ import (
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/protocol"
-	"github.com/syncthing/syncthing/lib/util"
+	"github.com/syncthing/syncthing/lib/semaphore"
 	"github.com/syncthing/syncthing/lib/versioner"
 )
 
@@ -57,7 +57,7 @@ type receiveOnlyFolder struct {
 	*sendReceiveFolder
 }
 
-func newReceiveOnlyFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, ver versioner.Versioner, evLogger events.Logger, ioLimiter *util.Semaphore) service {
+func newReceiveOnlyFolder(model *model, fset *db.FileSet, ignores *ignore.Matcher, cfg config.FolderConfiguration, ver versioner.Versioner, evLogger events.Logger, ioLimiter *semaphore.Semaphore) service {
 	sr := newSendReceiveFolder(model, fset, ignores, cfg, ver, evLogger, ioLimiter).(*sendReceiveFolder)
 	sr.localFlags = protocol.FlagLocalReceiveOnly // gets propagated to the scanner, and set on locally changed files
 	return &receiveOnlyFolder{sr}
@@ -92,8 +92,7 @@ func (f *receiveOnlyFolder) revert() error {
 		return err
 	}
 	defer snap.Release()
-	snap.WithHave(protocol.LocalDeviceID, func(intf protocol.FileIntf) bool {
-		fi := intf.(protocol.FileInfo)
+	snap.WithHave(protocol.LocalDeviceID, func(fi protocol.FileInfo) bool {
 		if !fi.IsReceiveOnlyChanged() {
 			// We're only interested in files that have changed locally in
 			// receive only mode.
@@ -216,7 +215,7 @@ func (q *deleteQueue) flush(snap *db.Snapshot) ([]string, error) {
 	for _, dir := range q.dirs {
 		if err := q.handler.deleteDirOnDisk(dir, snap, q.scanChan); err == nil {
 			deleted = append(deleted, dir)
-		} else if err != nil && firstError == nil {
+		} else if firstError == nil {
 			firstError = err
 		}
 	}

@@ -9,7 +9,33 @@ package config
 import (
 	"fmt"
 	"sort"
+
+	"github.com/syncthing/syncthing/lib/protocol"
 )
+
+const defaultNumConnections = 1 // number of connections to use by default; may change in the future.
+
+type DeviceConfiguration struct {
+	DeviceID                 protocol.DeviceID `json:"deviceID" xml:"id,attr" nodefault:"true"`
+	Name                     string            `json:"name" xml:"name,attr,omitempty"`
+	Addresses                []string          `json:"addresses" xml:"address,omitempty"`
+	Compression              Compression       `json:"compression" xml:"compression,attr"`
+	CertName                 string            `json:"certName" xml:"certName,attr,omitempty"`
+	Introducer               bool              `json:"introducer" xml:"introducer,attr"`
+	SkipIntroductionRemovals bool              `json:"skipIntroductionRemovals" xml:"skipIntroductionRemovals,attr"`
+	IntroducedBy             protocol.DeviceID `json:"introducedBy" xml:"introducedBy,attr" nodefault:"true"`
+	Paused                   bool              `json:"paused" xml:"paused"`
+	AllowedNetworks          []string          `json:"allowedNetworks" xml:"allowedNetwork,omitempty"`
+	AutoAcceptFolders        bool              `json:"autoAcceptFolders" xml:"autoAcceptFolders"`
+	MaxSendKbps              int               `json:"maxSendKbps" xml:"maxSendKbps"`
+	MaxRecvKbps              int               `json:"maxRecvKbps" xml:"maxRecvKbps"`
+	IgnoredFolders           []ObservedFolder  `json:"ignoredFolders" xml:"ignoredFolder"`
+	DeprecatedPendingFolders []ObservedFolder  `json:"-" xml:"pendingFolder,omitempty"` // Deprecated: Do not use.
+	MaxRequestKiB            int               `json:"maxRequestKiB" xml:"maxRequestKiB"`
+	Untrusted                bool              `json:"untrusted" xml:"untrusted"`
+	RemoteGUIPort            int               `json:"remoteGUIPort" xml:"remoteGUIPort"`
+	RawNumConnections        int               `json:"numConnections" xml:"numConnections"`
+}
 
 func (cfg DeviceConfiguration) Copy() DeviceConfiguration {
 	c := cfg
@@ -46,6 +72,17 @@ func (cfg *DeviceConfiguration) prepare(sharedFolders []string) {
 			l.Warnf("Device %s (%s) is both untrusted and auto-accepting folders, removing auto-accept flag", cfg.DeviceID.Short(), cfg.Name)
 			cfg.AutoAcceptFolders = false
 		}
+	}
+}
+
+func (cfg *DeviceConfiguration) NumConnections() int {
+	switch {
+	case cfg.RawNumConnections == 0:
+		return defaultNumConnections
+	case cfg.RawNumConnections < 0:
+		return 1
+	default:
+		return cfg.RawNumConnections
 	}
 }
 

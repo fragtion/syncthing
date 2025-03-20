@@ -32,6 +32,7 @@ import (
 
 	"github.com/calmh/incontainer"
 	"github.com/julienschmidt/httprouter"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rcrowley/go-metrics"
 	"github.com/thejerf/suture/v4"
 	"github.com/vitrun/qart/qr"
@@ -46,7 +47,6 @@ import (
 	"github.com/syncthing/syncthing/lib/discover"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
-	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/locations"
 	"github.com/syncthing/syncthing/lib/logger"
 	"github.com/syncthing/syncthing/lib/model"
@@ -91,6 +91,8 @@ type service struct {
 	startupErr           error
 	listenerAddr         net.Addr
 	exitChan             chan *svcutil.FatalErr
+	miscDB               *db.NamespacedKV
+	shutdownTimeout      time.Duration
 
 	guiErrors logger.Recorder
 	systemLog logger.Recorder
@@ -104,7 +106,7 @@ type Service interface {
 	WaitForStart() error
 }
 
-func New(id protocol.DeviceID, cfg config.Wrapper, assetDir, tlsDefaultCommonName string, m model.Model, defaultSub, diskSub events.BufferedSubscription, evLogger events.Logger, discoverer discover.Manager, connectionsService connections.Service, urService *ur.Service, fss model.FolderSummaryService, errors, systemLog logger.Recorder, noUpgrade bool) Service {
+func New(id protocol.DeviceID, cfg config.Wrapper, assetDir, tlsDefaultCommonName string, m model.Model, defaultSub, diskSub events.BufferedSubscription, evLogger events.Logger, discoverer discover.Manager, connectionsService connections.Service, urService *ur.Service, fss model.FolderSummaryService, errors, systemLog logger.Recorder, noUpgrade bool, miscDB *db.NamespacedKV) Service {
 	return &service{
 		id:      id,
 		cfg:     cfg,
@@ -127,6 +129,8 @@ func New(id protocol.DeviceID, cfg config.Wrapper, assetDir, tlsDefaultCommonNam
 		configChanged:        make(chan struct{}),
 		startedOnce:          make(chan struct{}),
 		exitChan:             make(chan *svcutil.FatalErr, 1),
+		miscDB:               miscDB,
+		shutdownTimeout:      100 * time.Millisecond,
 	}
 }
 
@@ -349,20 +353,31 @@ func (s *service) Serve(ctx context.Context) error {
 	mux.Handle("/", s.statics)
 
 	// Handle the special meta.js path
-	mux.HandleFunc("/meta.js", s.getJSMetadata)
+	mux.Handle("/meta.js", noCacheMiddleware(http.HandlerFunc(s.getJSMetadata)))
+
+	// Handle Prometheus metrics
+	promHttpHandler := promhttp.Handler()
+	mux.Handle("/metrics", promHttpHandler)
 
 	guiCfg := s.cfg.GUI()
 
 	// Wrap everything in CSRF protection. The /rest prefix should be
 	// protected, other requests will grant cookies.
-	var handler http.Handler = newCsrfManager(s.id.String()[:5], "/rest", guiCfg, mux, locations.Get(locations.CsrfTokens))
+	var handler http.Handler = newCsrfManager(s.id.Short().String(), "/rest", guiCfg, mux, s.miscDB)
 
 	// Add our version and ID as a header to responses
 	handler = withDetailsMiddleware(s.id, handler)
 
 	// Wrap everything in basic auth, if user/password is set.
 	if guiCfg.IsAuthEnabled() {
-		handler = basicAuthAndSessionMiddleware("sessionid-"+s.id.String()[:5], guiCfg, s.cfg.LDAP(), handler, s.evLogger)
+		tokenCookieManager := newTokenCookieManager(s.id.Short().String(), guiCfg, s.evLogger, s.miscDB)
+		authMW := newBasicAuthAndSessionMiddleware(tokenCookieManager, guiCfg, s.cfg.LDAP(), handler, s.evLogger)
+		handler = authMW
+
+		restMux.Handler(http.MethodPost, "/rest/noauth/auth/password", http.HandlerFunc(authMW.passwordAuthHandler))
+
+		// Logout is a no-op without a valid session cookie, so /noauth/ is fine here
+		restMux.Handler(http.MethodPost, "/rest/noauth/auth/logout", http.HandlerFunc(authMW.handleLogout))
 	}
 
 	// Redirect to HTTPS if we are supposed to
@@ -388,6 +403,9 @@ func (s *service) Serve(ctx context.Context) error {
 		// Prevent the HTTP server from logging stuff on its own. The things we
 		// care about we log ourselves from the handlers.
 		ErrorLog: log.New(io.Discard, "", 0),
+	}
+	if shouldDebugHTTP() {
+		srv.ErrorLog = log.Default()
 	}
 
 	l.Infoln("GUI and API listening on", listener.Addr())
@@ -435,7 +453,7 @@ func (s *service) Serve(ctx context.Context) error {
 	}
 	// Give it a moment to shut down gracefully, e.g. if we are restarting
 	// due to a config change through the API, let that finish successfully.
-	timeout, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	timeout, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(timeout); err == timeout.Err() {
 		srv.Close()
@@ -701,8 +719,10 @@ func (*service) getSystemPaths(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *service) getJSMetadata(w http.ResponseWriter, _ *http.Request) {
-	meta, _ := json.Marshal(map[string]string{
-		"deviceID": s.id.String(),
+	meta, _ := json.Marshal(map[string]interface{}{
+		"deviceID":      s.id.String(),
+		"deviceIDShort": s.id.Short().String(),
+		"authenticated": true,
 	})
 	w.Header().Set("Content-Type", "application/javascript")
 	fmt.Fprintf(w, "var metadata = %s;\n", meta)
@@ -962,6 +982,7 @@ func (s *service) getDBFile(w http.ResponseWriter, r *http.Request) {
 	av, err := s.model.Availability(folder, gf, protocol.BlockInfo{})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	mtimeMapping, mtimeErr := s.model.GetMtimeMapping(folder, file)
 
@@ -1149,6 +1170,7 @@ type fileEntry struct {
 
 func (s *service) getSupportBundle(w http.ResponseWriter, r *http.Request) {
 	var files []fileEntry
+	const profilingDuration = 4 * time.Second
 
 	// Redacted configuration as a JSON
 	if jsonConfig, err := json.MarshalIndent(getRedactedConfig(s), "", "  "); err != nil {
@@ -1214,20 +1236,56 @@ func (s *service) getSupportBundle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Heap and CPU Proofs as a pprof extension
-	var heapBuffer, cpuBuffer bytes.Buffer
-	filename := fmt.Sprintf("syncthing-heap-%s-%s-%s-%s.pprof", runtime.GOOS, runtime.GOARCH, build.Version, time.Now().Format("150405")) // hhmmss
-	runtime.GC()
-	if err := pprof.WriteHeapProfile(&heapBuffer); err == nil {
-		files = append(files, fileEntry{name: filename, data: heapBuffer.Bytes()})
+	// Metrics data as text
+	var metricsBuf bytes.Buffer
+	wr := bufferedResponseWriter{Writer: &metricsBuf}
+	promhttp.Handler().ServeHTTP(wr, &http.Request{Method: http.MethodGet})
+	files = append(files, fileEntry{name: "metrics.txt", data: metricsBuf.Bytes()})
+
+	// Connection data as JSON
+	connStats := s.model.ConnectionStats()
+	if connStatsJSON, err := json.MarshalIndent(connStats, "", "  "); err != nil {
+		l.Warnln("Support bundle: failed to serialize connection-stats.json.txt", err)
+	} else {
+		files = append(files, fileEntry{name: "connection-stats.json.txt", data: connStatsJSON})
 	}
 
-	const duration = 4 * time.Second
-	filename = fmt.Sprintf("syncthing-cpu-%s-%s-%s-%s.pprof", runtime.GOOS, runtime.GOARCH, build.Version, time.Now().Format("150405")) // hhmmss
-	if err := pprof.StartCPUProfile(&cpuBuffer); err == nil {
-		time.Sleep(duration)
+	// Write a goroutine profile
+	if p := pprof.Lookup("goroutine"); p != nil {
+		var goroutineBuf bytes.Buffer
+		_ = p.WriteTo(&goroutineBuf, 0)
+		filename := fmt.Sprintf("syncthing-goroutines-%s-%s-%s-%s.pprof", runtime.GOOS, runtime.GOARCH, build.Version, time.Now().Format("150405")) // hhmmss
+		files = append(files, fileEntry{name: filename, data: goroutineBuf.Bytes()})
+	}
+
+	// Take a heap profile
+	var heapBuf bytes.Buffer
+	runtime.GC()
+	if err := pprof.WriteHeapProfile(&heapBuf); err == nil {
+		filename := fmt.Sprintf("syncthing-heap-%s-%s-%s-%s.pprof", runtime.GOOS, runtime.GOARCH, build.Version, time.Now().Format("150405")) // hhmmss
+		files = append(files, fileEntry{name: filename, data: heapBuf.Bytes()})
+	}
+
+	// Enable block profiling
+	runtime.SetBlockProfileRate(1)
+	defer runtime.SetBlockProfileRate(0)
+
+	// Take a CPU profile, waiting for the profiling duration. This also
+	// gives time for the block profile.
+	var cpuBuf bytes.Buffer
+	if err := pprof.StartCPUProfile(&cpuBuf); err == nil {
+		time.Sleep(profilingDuration)
 		pprof.StopCPUProfile()
-		files = append(files, fileEntry{name: filename, data: cpuBuffer.Bytes()})
+		filename := fmt.Sprintf("syncthing-cpu-%s-%s-%s-%s.pprof", runtime.GOOS, runtime.GOARCH, build.Version, time.Now().Format("150405")) // hhmmss
+		files = append(files, fileEntry{name: filename, data: cpuBuf.Bytes()})
+	}
+
+	// Write the block profile
+	if p := pprof.Lookup("block"); p != nil {
+		var blockBuf bytes.Buffer
+		_ = p.WriteTo(&blockBuf, 0)
+		filename := fmt.Sprintf("syncthing-block-%s-%s-%s-%s.pprof", runtime.GOOS, runtime.GOARCH, build.Version, time.Now().Format("150405")) // hhmmss
+		files = append(files, fileEntry{name: filename, data: blockBuf.Bytes()})
 	}
 
 	// Add buffer files to buffer zip
@@ -1317,11 +1375,6 @@ func (s *service) getDBIgnores(w http.ResponseWriter, r *http.Request) {
 	folder := qs.Get("folder")
 
 	lines, patterns, err := s.model.LoadIgnores(folder)
-	if err != nil && !ignore.IsParseError(err) {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	sendJSON(w, map[string]interface{}{
 		"ignore":   lines,
 		"expanded": patterns,
@@ -1366,11 +1419,7 @@ func (s *service) getDiskEvents(w http.ResponseWriter, r *http.Request) {
 	s.getEvents(w, r, sub)
 }
 
-func (s *service) getEvents(w http.ResponseWriter, r *http.Request, eventSub events.BufferedSubscription) {
-	if eventSub.Mask()&(events.FolderSummary|events.FolderCompletion) != 0 {
-		s.fss.OnEventRequest()
-	}
-
+func (*service) getEvents(w http.ResponseWriter, r *http.Request, eventSub events.BufferedSubscription) {
 	qs := r.URL.Query()
 	sinceStr := qs.Get("since")
 	limitStr := qs.Get("limit")
@@ -1462,11 +1511,33 @@ func (*service) getDeviceID(w http.ResponseWriter, r *http.Request) {
 
 func (*service) getLang(w http.ResponseWriter, r *http.Request) {
 	lang := r.Header.Get("Accept-Language")
-	var langs []string
+	weights := make(map[string]float64)
 	for _, l := range strings.Split(lang, ",") {
 		parts := strings.SplitN(l, ";", 2)
-		langs = append(langs, strings.ToLower(strings.TrimSpace(parts[0])))
+		code := strings.ToLower(strings.TrimSpace(parts[0]))
+		weights[code] = 1.0
+		if len(parts) < 2 {
+			continue
+		}
+		weight := strings.ToLower(strings.TrimSpace(parts[1]))
+		if !strings.HasPrefix(weight, "q=") {
+			continue
+		}
+		if q, err := strconv.ParseFloat(weight[2:], 32); err != nil {
+			// Completely dismiss entries with invalid weight
+			delete(weights, code)
+		} else {
+			weights[code] = q
+		}
 	}
+	langs := make([]string, 0, len(weights))
+	for code := range weights {
+		langs = append(langs, code)
+	}
+	// Reorder by descending q value
+	sort.SliceStable(langs, func(i, j int) bool {
+		return weights[langs[i]] > weights[langs[j]]
+	})
 	sendJSON(w, langs)
 }
 
@@ -1591,7 +1662,7 @@ func (s *service) getPeerCompletion(w http.ResponseWriter, _ *http.Request) {
 	for _, folder := range s.cfg.Folders() {
 		for _, device := range folder.DeviceIDs() {
 			deviceStr := device.String()
-			if _, ok := s.model.Connection(device); ok {
+			if s.model.ConnectedTo(device) {
 				comp, err := s.model.Completion(device, folder.ID)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1682,10 +1753,10 @@ func (*service) getSystemBrowse(w http.ResponseWriter, r *http.Request) {
 	current := qs.Get("current")
 
 	// Default value or in case of error unmarshalling ends up being basic fs.
-	var fsType fs.FilesystemType
+	var fsType config.FilesystemType
 	fsType.UnmarshalText([]byte(qs.Get("filesystem")))
 
-	sendJSON(w, browse(fsType, current))
+	sendJSON(w, browse(fsType.ToFS(), current))
 }
 
 func browse(fsType fs.FilesystemType, current string) []string {
@@ -1693,7 +1764,7 @@ func browse(fsType fs.FilesystemType, current string) []string {
 		return browseRoots(fsType)
 	}
 
-	parent, base := parentAndBase(current)
+	parent, base := filepath.Split(current)
 	ffs := fs.NewFilesystem(fsType, parent)
 	files := browseFiles(ffs, base)
 	for i := range files {
@@ -1727,27 +1798,6 @@ func browseRoots(fsType fs.FilesystemType) []string {
 	}
 
 	return nil
-}
-
-// parentAndBase returns the parent directory and the remaining base of the
-// path. The base may be empty if the path ends with a path separator.
-func parentAndBase(current string) (string, string) {
-	search, _ := fs.ExpandTilde(current)
-	pathSeparator := string(fs.PathSeparator)
-
-	if strings.HasSuffix(current, pathSeparator) && !strings.HasSuffix(search, pathSeparator) {
-		search = search + pathSeparator
-	}
-	searchDir := filepath.Dir(search)
-
-	// The searchFile should be the last component of search, or empty if it
-	// ends with a path separator
-	var searchFile string
-	if !strings.HasSuffix(search, pathSeparator) {
-		searchFile = filepath.Base(search)
-	}
-
-	return searchDir, searchFile
 }
 
 func browseFiles(ffs fs.Filesystem, search string) []string {
@@ -1804,10 +1854,10 @@ func (*service) getHeapProf(w http.ResponseWriter, _ *http.Request) {
 	pprof.WriteHeapProfile(w)
 }
 
-func toJsonFileInfoSlice(fs []db.FileInfoTruncated) []jsonFileInfoTrunc {
-	res := make([]jsonFileInfoTrunc, len(fs))
+func toJsonFileInfoSlice(fs []protocol.FileInfo) []jsonFileInfo {
+	res := make([]jsonFileInfo, len(fs))
 	for i, f := range fs {
-		res[i] = jsonFileInfoTrunc(f)
+		res[i] = jsonFileInfo(f)
 	}
 	return res
 }
@@ -1822,15 +1872,7 @@ func (f jsonFileInfo) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m)
 }
 
-type jsonFileInfoTrunc db.FileInfoTruncated
-
-func (f jsonFileInfoTrunc) MarshalJSON() ([]byte, error) {
-	m := fileIntfJSONMap(db.FileInfoTruncated(f))
-	m["numBlocks"] = nil // explicitly unknown
-	return json.Marshal(m)
-}
-
-func fileIntfJSONMap(f protocol.FileIntf) map[string]interface{} {
+func fileIntfJSONMap(f protocol.FileInfo) map[string]interface{} {
 	out := map[string]interface{}{
 		"name":          f.FileName(),
 		"type":          f.FileType().String(),
@@ -2042,4 +2084,13 @@ func httpError(w http.ResponseWriter, err error) {
 	} else {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+type bufferedResponseWriter struct {
+	io.Writer
+}
+
+func (w bufferedResponseWriter) WriteHeader(int) {}
+func (w bufferedResponseWriter) Header() http.Header {
+	return http.Header{}
 }

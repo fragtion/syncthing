@@ -11,13 +11,15 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/urfave/cli"
+	"google.golang.org/protobuf/proto"
 
+	"github.com/syncthing/syncthing/internal/gen/bep"
+	"github.com/syncthing/syncthing/internal/gen/dbproto"
 	"github.com/syncthing/syncthing/lib/db"
 	"github.com/syncthing/syncthing/lib/protocol"
 )
 
-func indexDump(*cli.Context) error {
+func indexDump() error {
 	ldb, err := getDB()
 	if err != nil {
 		return err
@@ -35,19 +37,19 @@ func indexDump(*cli.Context) error {
 			name := nulString(key[1+4+4:])
 			fmt.Printf("[device] F:%d D:%d N:%q", folder, device, name)
 
-			var f protocol.FileInfo
-			err := f.Unmarshal(it.Value())
+			var f bep.FileInfo
+			err := proto.Unmarshal(it.Value(), &f)
 			if err != nil {
 				return err
 			}
-			fmt.Printf(" V:%v\n", f)
+			fmt.Printf(" V:%v\n", &f)
 
 		case db.KeyTypeGlobal:
 			folder := binary.BigEndian.Uint32(key[1:])
 			name := nulString(key[1+4:])
-			var flv db.VersionList
-			flv.Unmarshal(it.Value())
-			fmt.Printf("[global] F:%d N:%q V:%s\n", folder, name, flv)
+			var flv dbproto.VersionList
+			proto.Unmarshal(it.Value(), &flv)
+			fmt.Printf("[global] F:%d N:%q V:%s\n", folder, name, &flv)
 
 		case db.KeyTypeBlock:
 			folder := binary.BigEndian.Uint32(key[1:])
@@ -96,11 +98,11 @@ func indexDump(*cli.Context) error {
 		case db.KeyTypeFolderMeta:
 			folder := binary.BigEndian.Uint32(key[1:])
 			fmt.Printf("[foldermeta] F:%d", folder)
-			var cs db.CountsSet
-			if err := cs.Unmarshal(it.Value()); err != nil {
+			var cs dbproto.CountsSet
+			if err := proto.Unmarshal(it.Value(), &cs); err != nil {
 				fmt.Printf(" (invalid)\n")
 			} else {
-				fmt.Printf(" V:%v\n", cs)
+				fmt.Printf(" V:%v\n", &cs)
 			}
 
 		case db.KeyTypeMiscData:
@@ -127,20 +129,20 @@ func indexDump(*cli.Context) error {
 
 		case db.KeyTypeVersion:
 			fmt.Printf("[version] H:%x", key[1:])
-			var v protocol.Vector
-			err := v.Unmarshal(it.Value())
+			var v bep.Vector
+			err := proto.Unmarshal(it.Value(), &v)
 			if err != nil {
 				fmt.Printf(" (invalid)\n")
 			} else {
-				fmt.Printf(" V:%v\n", v)
+				fmt.Printf(" V:%v\n", &v)
 			}
 
 		case db.KeyTypePendingFolder:
 			device := binary.BigEndian.Uint32(key[1:])
 			folder := string(key[5:])
-			var of db.ObservedFolder
-			of.Unmarshal(it.Value())
-			fmt.Printf("[pendingFolder] D:%d F:%s V:%v\n", device, folder, of)
+			var of dbproto.ObservedFolder
+			proto.Unmarshal(it.Value(), &of)
+			fmt.Printf("[pendingFolder] D:%d F:%s V:%v\n", device, folder, &of)
 
 		case db.KeyTypePendingDevice:
 			device := "<invalid>"
@@ -148,9 +150,9 @@ func indexDump(*cli.Context) error {
 			if err == nil {
 				device = dev.String()
 			}
-			var od db.ObservedDevice
-			od.Unmarshal(it.Value())
-			fmt.Printf("[pendingDevice] D:%v V:%v\n", device, od)
+			var od dbproto.ObservedDevice
+			proto.Unmarshal(it.Value(), &od)
+			fmt.Printf("[pendingDevice] D:%v V:%v\n", device, &od)
 
 		default:
 			fmt.Printf("[??? %d]\n  %x\n  %x\n", key[0], key, it.Value())

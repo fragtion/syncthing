@@ -16,14 +16,17 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/fs"
+	"github.com/syncthing/syncthing/lib/netutil"
 	"github.com/syncthing/syncthing/lib/protocol"
-	"github.com/syncthing/syncthing/lib/util"
+	"github.com/syncthing/syncthing/lib/sliceutil"
+	"github.com/syncthing/syncthing/lib/structutil"
 )
 
 const (
@@ -42,22 +45,21 @@ var (
 	// "consumer" of the configuration as we don't want these saved to the
 	// config.
 	DefaultListenAddresses = []string{
-		util.Address("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(DefaultTCPPort))),
+		netutil.AddressURL("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(DefaultTCPPort))),
 		"dynamic+https://relays.syncthing.net/endpoint",
-		util.Address("quic", net.JoinHostPort("0.0.0.0", strconv.Itoa(DefaultQUICPort))),
+		netutil.AddressURL("quic", net.JoinHostPort("0.0.0.0", strconv.Itoa(DefaultQUICPort))),
 	}
-	DefaultGUIPort = 8384
 	// DefaultDiscoveryServersV4 should be substituted when the configuration
 	// contains <globalAnnounceServer>default-v4</globalAnnounceServer>.
 	DefaultDiscoveryServersV4 = []string{
-		"https://discovery.syncthing.net/v2/?noannounce&id=LYXKCHX-VI3NYZR-ALCJBHF-WMZYSPK-QG6QJA3-MPFYMSO-U56GTUK-NA2MIAW",
-		"https://discovery-v4.syncthing.net/v2/?nolookup&id=LYXKCHX-VI3NYZR-ALCJBHF-WMZYSPK-QG6QJA3-MPFYMSO-U56GTUK-NA2MIAW",
+		"https://discovery-lookup.syncthing.net/v2/?noannounce",
+		"https://discovery-announce-v4.syncthing.net/v2/?nolookup",
 	}
 	// DefaultDiscoveryServersV6 should be substituted when the configuration
 	// contains <globalAnnounceServer>default-v6</globalAnnounceServer>.
 	DefaultDiscoveryServersV6 = []string{
-		"https://discovery.syncthing.net/v2/?noannounce&id=LYXKCHX-VI3NYZR-ALCJBHF-WMZYSPK-QG6QJA3-MPFYMSO-U56GTUK-NA2MIAW",
-		"https://discovery-v6.syncthing.net/v2/?nolookup&id=LYXKCHX-VI3NYZR-ALCJBHF-WMZYSPK-QG6QJA3-MPFYMSO-U56GTUK-NA2MIAW",
+		"https://discovery-lookup.syncthing.net/v2/?noannounce",
+		"https://discovery-announce-v6.syncthing.net/v2/?nolookup",
 	}
 	// DefaultDiscoveryServers should be substituted when the configuration
 	// contains <globalAnnounceServer>default</globalAnnounceServer>.
@@ -76,8 +78,10 @@ var (
 		"stun.counterpath.com:3478",
 		"stun.counterpath.net:3478",
 		"stun.ekiga.net:3478",
+		"stun.hitv.com:3478",
 		"stun.ideasip.com:3478",
 		"stun.internetcalls.com:3478",
+		"stun.miwifi.com:3478",
 		"stun.schlund.de:3478",
 		"stun.sipgate.net:10000",
 		"stun.sipgate.net:3478",
@@ -95,13 +99,35 @@ var (
 	errFolderPathEmpty   = errors.New("folder has empty path")
 )
 
+type Configuration struct {
+	Version                  int                   `json:"version" xml:"version,attr"`
+	Folders                  []FolderConfiguration `json:"folders" xml:"folder"`
+	Devices                  []DeviceConfiguration `json:"devices" xml:"device"`
+	GUI                      GUIConfiguration      `json:"gui" xml:"gui"`
+	LDAP                     LDAPConfiguration     `json:"ldap" xml:"ldap"`
+	Options                  OptionsConfiguration  `json:"options" xml:"options"`
+	IgnoredDevices           []ObservedDevice      `json:"remoteIgnoredDevices" xml:"remoteIgnoredDevice"`
+	DeprecatedPendingDevices []ObservedDevice      `json:"-" xml:"pendingDevice,omitempty"` // Deprecated: Do not use.
+	Defaults                 Defaults              `json:"defaults" xml:"defaults"`
+}
+
+type Defaults struct {
+	Folder  FolderConfiguration `json:"folder" xml:"folder"`
+	Device  DeviceConfiguration `json:"device" xml:"device"`
+	Ignores Ignores             `json:"ignores" xml:"ignores"`
+}
+
+type Ignores struct {
+	Lines []string `json:"lines" xml:"line"`
+}
+
 func New(myID protocol.DeviceID) Configuration {
 	var cfg Configuration
 	cfg.Version = CurrentVersion
 
 	cfg.Options.UnackedNotificationIDs = []string{"authenticationUserAndPassword"}
 
-	util.SetDefaults(&cfg)
+	structutil.SetDefaults(&cfg)
 
 	// Can't happen.
 	if err := cfg.prepare(myID); err != nil {
@@ -113,13 +139,23 @@ func New(myID protocol.DeviceID) Configuration {
 }
 
 func (cfg *Configuration) ProbeFreePorts() error {
-	port, err := getFreePort("127.0.0.1", DefaultGUIPort)
-	if err != nil {
-		return fmt.Errorf("get free port (GUI): %w", err)
+	if cfg.GUI.Network() == "tcp" {
+		guiHost, guiPort, err := net.SplitHostPort(cfg.GUI.Address())
+		if err != nil {
+			return fmt.Errorf("get default port (GUI): %w", err)
+		}
+		port, err := strconv.Atoi(guiPort)
+		if err != nil {
+			return fmt.Errorf("convert default port (GUI): %w", err)
+		}
+		port, err = getFreePort(guiHost, port)
+		if err != nil {
+			return fmt.Errorf("get free port (GUI): %w", err)
+		}
+		cfg.GUI.RawAddress = net.JoinHostPort(guiHost, strconv.Itoa(port))
 	}
-	cfg.GUI.RawAddress = fmt.Sprintf("127.0.0.1:%d", port)
 
-	port, err = getFreePort("0.0.0.0", DefaultTCPPort)
+	port, err := getFreePort("0.0.0.0", DefaultTCPPort)
 	if err != nil {
 		return fmt.Errorf("get free port (BEP): %w", err)
 	}
@@ -127,9 +163,9 @@ func (cfg *Configuration) ProbeFreePorts() error {
 		cfg.Options.RawListenAddresses = []string{"default"}
 	} else {
 		cfg.Options.RawListenAddresses = []string{
-			util.Address("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(port))),
+			netutil.AddressURL("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(port))),
 			"dynamic+https://relays.syncthing.net/endpoint",
-			util.Address("quic", net.JoinHostPort("0.0.0.0", strconv.Itoa(port))),
+			netutil.AddressURL("quic", net.JoinHostPort("0.0.0.0", strconv.Itoa(port))),
 		}
 	}
 
@@ -144,7 +180,7 @@ type xmlConfiguration struct {
 func ReadXML(r io.Reader, myID protocol.DeviceID) (Configuration, int, error) {
 	var cfg xmlConfiguration
 
-	util.SetDefaults(&cfg)
+	structutil.SetDefaults(&cfg)
 
 	if err := xml.NewDecoder(r).Decode(&cfg); err != nil {
 		return Configuration{}, 0, err
@@ -166,7 +202,7 @@ func ReadJSON(r io.Reader, myID protocol.DeviceID) (Configuration, error) {
 
 	var cfg Configuration
 
-	util.SetDefaults(&cfg)
+	structutil.SetDefaults(&cfg)
 
 	if err := json.Unmarshal(bs, &cfg); err != nil {
 		return Configuration{}, err
@@ -259,7 +295,7 @@ func (cfg *Configuration) prepare(myID protocol.DeviceID) error {
 
 	cfg.removeDeprecatedProtocols()
 
-	util.FillNilExceptDeprecated(cfg)
+	structutil.FillNilExceptDeprecated(cfg)
 
 	// TestIssue1750 relies on migrations happening after preparing options.
 	cfg.applyMigrations()
@@ -556,14 +592,13 @@ loop:
 func ensureNoUntrustedTrustingSharing(f *FolderConfiguration, devices []FolderDeviceConfiguration, existingDevices map[protocol.DeviceID]*DeviceConfiguration) []FolderDeviceConfiguration {
 	for i := 0; i < len(devices); i++ {
 		dev := devices[i]
-		if dev.EncryptionPassword != "" {
-			// There's a password set, no check required
+		if dev.EncryptionPassword != "" || f.Type == FolderTypeReceiveEncrypted {
+			// There's a password set or the folder is received encrypted, no check required
 			continue
 		}
 		if devCfg := existingDevices[dev.DeviceID]; devCfg.Untrusted {
 			l.Warnf("Folder %s (%s) is shared in trusted mode with untrusted device %s (%s); unsharing.", f.ID, f.Label, dev.DeviceID.Short(), devCfg.Name)
-			copy(devices[i:], devices[i+1:])
-			devices = devices[:len(devices)-1]
+			devices = sliceutil.RemoveAndZero(devices, i)
 			i--
 		}
 	}
@@ -599,9 +634,7 @@ func filterURLSchemePrefix(addrs []string, prefix string) []string {
 			continue
 		}
 		if strings.HasPrefix(uri.Scheme, prefix) {
-			// Remove this entry
-			copy(addrs[i:], addrs[i+1:])
-			addrs = addrs[:len(addrs)-1]
+			addrs = sliceutil.RemoveAndZero(addrs, i)
 			i--
 		}
 	}
@@ -636,12 +669,42 @@ func (defaults *Defaults) prepare(myID protocol.DeviceID, existingDevices map[pr
 }
 
 func ensureZeroForNodefault(empty interface{}, target interface{}) {
-	util.CopyMatchingTag(empty, target, "nodefault", func(v string) bool {
+	copyMatchingTag(empty, target, "nodefault", func(v string) bool {
 		if len(v) > 0 && v != "true" {
 			panic(fmt.Sprintf(`unexpected tag value: %s. expected untagged or "true"`, v))
 		}
 		return len(v) > 0
 	})
+}
+
+// copyMatchingTag copies fields tagged tag:"value" from "from" struct onto "to" struct.
+func copyMatchingTag(from interface{}, to interface{}, tag string, shouldCopy func(value string) bool) {
+	fromStruct := reflect.ValueOf(from).Elem()
+	fromType := fromStruct.Type()
+
+	toStruct := reflect.ValueOf(to).Elem()
+	toType := toStruct.Type()
+
+	if fromType != toType {
+		panic(fmt.Sprintf("non equal types: %s != %s", fromType, toType))
+	}
+
+	for i := 0; i < toStruct.NumField(); i++ {
+		fromField := fromStruct.Field(i)
+		toField := toStruct.Field(i)
+
+		if !toField.CanSet() {
+			// Unexported fields
+			continue
+		}
+
+		structTag := toType.Field(i).Tag
+
+		v := structTag.Get(tag)
+		if shouldCopy(v) {
+			toField.Set(fromField)
+		}
+	}
 }
 
 func (i Ignores) Copy() Ignores {

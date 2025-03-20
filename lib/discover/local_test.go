@@ -13,6 +13,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/syncthing/syncthing/internal/gen/discoproto"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/protocol"
 )
@@ -50,40 +51,40 @@ func TestLocalInstanceIDShouldTriggerNew(t *testing.T) {
 	lc := c.(*localClient)
 	src := &net.UDPAddr{IP: []byte{10, 20, 30, 40}, Port: 50}
 
-	new := lc.registerDevice(src, Announce{
-		ID:         protocol.DeviceID{10, 20, 30, 40, 50, 60, 70, 80, 90},
+	new := lc.registerDevice(src, &discoproto.Announce{
+		Id:         padDeviceID(10),
 		Addresses:  []string{"tcp://0.0.0.0:22000"},
-		InstanceID: 1234567890,
+		InstanceId: 1234567890,
 	})
 
 	if !new {
 		t.Fatal("first register should be new")
 	}
 
-	new = lc.registerDevice(src, Announce{
-		ID:         protocol.DeviceID{10, 20, 30, 40, 50, 60, 70, 80, 90},
+	new = lc.registerDevice(src, &discoproto.Announce{
+		Id:         padDeviceID(10),
 		Addresses:  []string{"tcp://0.0.0.0:22000"},
-		InstanceID: 1234567890,
+		InstanceId: 1234567890,
 	})
 
 	if new {
 		t.Fatal("second register should not be new")
 	}
 
-	new = lc.registerDevice(src, Announce{
-		ID:         protocol.DeviceID{42, 10, 20, 30, 40, 50, 60, 70, 80, 90},
+	new = lc.registerDevice(src, &discoproto.Announce{
+		Id:         padDeviceID(42),
 		Addresses:  []string{"tcp://0.0.0.0:22000"},
-		InstanceID: 1234567890,
+		InstanceId: 1234567890,
 	})
 
 	if !new {
 		t.Fatal("new device ID should be new")
 	}
 
-	new = lc.registerDevice(src, Announce{
-		ID:         protocol.DeviceID{10, 20, 30, 40, 50, 60, 70, 80, 90},
+	new = lc.registerDevice(src, &discoproto.Announce{
+		Id:         padDeviceID(10),
 		Addresses:  []string{"tcp://0.0.0.0:22000"},
-		InstanceID: 91234567890,
+		InstanceId: 91234567890,
 	})
 
 	if !new {
@@ -91,14 +92,20 @@ func TestLocalInstanceIDShouldTriggerNew(t *testing.T) {
 	}
 }
 
-func TestFilterUnspecified(t *testing.T) {
+func padDeviceID(bs ...byte) []byte {
+	var padded [32]byte
+	copy(padded[:], bs)
+	return padded[:]
+}
+
+func TestFilterUndialable(t *testing.T) {
 	addrs := []string{
 		"quic://[2001:db8::1]:22000",             // OK
 		"tcp://192.0.2.42:22000",                 // OK
 		"quic://[2001:db8::1]:0",                 // remove, port zero
 		"tcp://192.0.2.42:0",                     // remove, port zero
-		"quic://[::]:22000",                      // remove, unspecified
-		"tcp://0.0.0.0:22000",                    // remove, unspecified
+		"quic://[::]:22000",                      // OK
+		"tcp://0.0.0.0:22000",                    // OK
 		"tcp://[2001:db8::1]",                    // remove, no port
 		"tcp://192.0.2.42",                       // remove, no port
 		"tcp://foo:bar",                          // remove, host/port does not resolve
@@ -112,11 +119,13 @@ func TestFilterUnspecified(t *testing.T) {
 	exp := []string{
 		"quic://[2001:db8::1]:22000",
 		"tcp://192.0.2.42:22000",
+		"quic://[::]:22000",
+		"tcp://0.0.0.0:22000",
 		"tcp://[fe80::9ef:dff1:b332:5e56]:55681",
 	}
-	res := filterUnspecifiedLocal(addrs)
+	res := filterUndialableLocal(addrs)
 	if fmt.Sprint(res) != fmt.Sprint(exp) {
 		t.Log(res)
-		t.Error("filterUnspecified returned invalid addresses")
+		t.Error("filterUndialableLocal returned invalid addresses")
 	}
 }

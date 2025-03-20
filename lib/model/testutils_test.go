@@ -19,6 +19,7 @@ import (
 	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/protocol"
+	"github.com/syncthing/syncthing/lib/protocol/mocks"
 	"github.com/syncthing/syncthing/lib/rand"
 )
 
@@ -29,12 +30,18 @@ var (
 	defaultFolderConfig     config.FolderConfiguration
 	defaultCfg              config.Configuration
 	defaultAutoAcceptCfg    config.Configuration
+	device1Conn             = &mocks.Connection{}
+	device2Conn             = &mocks.Connection{}
 )
 
 func init() {
 	myID, _ = protocol.DeviceIDFromString("ZNWFSWE-RWRV2BD-45BLMCV-LTDE2UR-4LJDW6J-R5BPWEB-TXD27XJ-IZF5RA4")
 	device1, _ = protocol.DeviceIDFromString("AIR6LPZ-7K4PTTV-UXQSMUU-CPQ5YWH-OEDFIIQ-JUG777G-2YQXXR5-YD6AWQR")
 	device2, _ = protocol.DeviceIDFromString("GYRZZQB-IRNPV4Z-T7TC52W-EQYJ3TT-FDQW6MW-DFLMU42-SSSU6EM-FBK2VAY")
+	device1Conn.DeviceIDReturns(device1)
+	device1Conn.ConnectionIDReturns(rand.String(16))
+	device2Conn.DeviceIDReturns(device2)
+	device2Conn.ConnectionIDReturns(rand.String(16))
 
 	cfg := config.New(myID)
 	cfg.Options.MinHomeDiskFree.Value = 0 // avoids unnecessary free space checks
@@ -68,7 +75,7 @@ func init() {
 		},
 		Defaults: config.Defaults{
 			Folder: config.FolderConfiguration{
-				FilesystemType: fs.FilesystemTypeFake,
+				FilesystemType: config.FilesystemTypeFake,
 				Path:           rand.String(32),
 			},
 		},
@@ -95,7 +102,7 @@ func newDefaultCfgWrapper() (config.Wrapper, config.FolderConfiguration, context
 }
 
 func newFolderConfig() config.FolderConfiguration {
-	cfg := newFolderConfiguration(defaultCfgWrapper, "default", "default", fs.FilesystemTypeFake, rand.String(32)+"?content=true")
+	cfg := newFolderConfiguration(defaultCfgWrapper, "default", "default", config.FilesystemTypeFake, rand.String(32)+"?content=true")
 	cfg.FSWatcherEnabled = false
 	cfg.Devices = append(cfg.Devices, config.FolderDeviceConfiguration{DeviceID: device1})
 	return cfg
@@ -122,7 +129,7 @@ func setupModelWithConnectionFromWrapper(t testing.TB, w config.Wrapper) (*testM
 
 func setupModel(t testing.TB, w config.Wrapper) *testModel {
 	t.Helper()
-	m := newModel(t, w, myID, "syncthing", "dev", nil)
+	m := newModel(t, w, myID, nil)
 	m.ServeBackground()
 	<-m.started
 
@@ -139,14 +146,14 @@ type testModel struct {
 	stopped  chan struct{}
 }
 
-func newModel(t testing.TB, cfg config.Wrapper, id protocol.DeviceID, clientName, clientVersion string, protectedFiles []string) *testModel {
+func newModel(t testing.TB, cfg config.Wrapper, id protocol.DeviceID, protectedFiles []string) *testModel {
 	t.Helper()
 	evLogger := events.NewLogger()
 	ldb, err := db.NewLowlevel(backend.OpenMemory(), evLogger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewModel(cfg, id, clientName, clientVersion, ldb, protectedFiles, evLogger, protocol.NewKeyGenerator()).(*model)
+	m := NewModel(cfg, id, ldb, protectedFiles, evLogger, protocol.NewKeyGenerator()).(*model)
 	ctx, cancel := context.WithCancel(context.Background())
 	go evLogger.Serve(ctx)
 	return &testModel{
@@ -288,12 +295,12 @@ func folderIgnoresAlwaysReload(t testing.TB, m *testModel, fcfg config.FolderCon
 	m.removeFolder(fcfg)
 	fset := newFileSet(t, fcfg.ID, m.db)
 	ignores := ignore.New(fcfg.Filesystem(nil), ignore.WithCache(true), ignore.WithChangeDetector(newAlwaysChanged()))
-	m.fmut.Lock()
+	m.mut.Lock()
 	m.addAndStartFolderLockedWithIgnores(fcfg, fset, ignores)
-	m.fmut.Unlock()
+	m.mut.Unlock()
 }
 
-func basicClusterConfig(local, remote protocol.DeviceID, folders ...string) protocol.ClusterConfig {
+func basicClusterConfig(local, remote protocol.DeviceID, folders ...string) *protocol.ClusterConfig {
 	var cc protocol.ClusterConfig
 	for _, folder := range folders {
 		cc.Folders = append(cc.Folders, protocol.Folder{
@@ -308,13 +315,13 @@ func basicClusterConfig(local, remote protocol.DeviceID, folders ...string) prot
 			},
 		})
 	}
-	return cc
+	return &cc
 }
 
 func localIndexUpdate(m *testModel, folder string, fs []protocol.FileInfo) {
-	m.fmut.RLock()
+	m.mut.RLock()
 	fset := m.folderFiles[folder]
-	m.fmut.RUnlock()
+	m.mut.RUnlock()
 
 	fset.Update(protocol.LocalDeviceID, fs)
 	seq := fset.Sequence(protocol.LocalDeviceID)

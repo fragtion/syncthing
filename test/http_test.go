@@ -173,7 +173,7 @@ func TestHTTPPOSTWithoutCSRF(t *testing.T) {
 	}
 	res.Body.Close()
 	hdr := res.Header.Get("Set-Cookie")
-	id := res.Header.Get("X-Syncthing-ID")[:5]
+	id := res.Header.Get("X-Syncthing-ID")[:protocol.ShortIDStringLength]
 	if !strings.Contains(hdr, "CSRF-Token") {
 		t.Error("Missing CSRF-Token in", hdr)
 	}
@@ -223,7 +223,7 @@ func setupAPIBench() *rc.Process {
 		panic(err)
 	}
 
-	err = os.WriteFile("s1/knownfile", []byte("somedatahere"), 0644)
+	err = os.WriteFile("s1/knownfile", []byte("somedatahere"), 0o644)
 	if err != nil {
 		panic(err)
 	}
