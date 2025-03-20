@@ -435,98 +435,6 @@ jobs:
           path: syncthing-source-*.tar.gz
 
   #
-  # Sign binaries for auto upgrade, generate ASC signature files
-  #
-
-  sign-for-upgrade:
-    name: Sign for upgrade
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/release-')  || startsWith(github.ref, 'refs/tags/v'))
-    environment: release
-    needs:
-      - package-windows
-      - package-linux
-      - package-macos
-      - package-cross
-      - package-source
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.ref }} # https://github.com/actions/checkout/issues/882
-
-      - uses: actions/checkout@v4
-        with:
-          repository: syncthing/release-tools
-          path: tools
-          fetch-depth: 0
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: false
-          check-latest: true
-
-      - name: Install signing tool
-        run: |
-          go install ./cmd/dev/stsigtool
-
-      - name: Sign archives
-        run: |
-          export PRIVATE_KEY="$RUNNER_TEMP/privkey.pem"
-          export PATH="$PATH:$(go env GOPATH)/bin"
-          echo "$STSIGTOOL_PRIVATE_KEY" | base64 -d > "$PRIVATE_KEY"
-          mkdir packages
-          mv packages-*/* packages
-          pushd packages
-          "$GITHUB_WORKSPACE/tools/sign-only"
-          rm -f "$PRIVATE_KEY"
-        env:
-          STSIGTOOL_PRIVATE_KEY: ${{ secrets.STSIGTOOL_PRIVATE_KEY }}
-
-      - name: Create shasum files
-        run: |
-          pushd packages
-          files=(*.tar.gz *.zip)
-          sha1sum "${files[@]}" > sha1sum.txt
-          sha256sum "${files[@]}" > sha256sum.txt
-          popd
-
-          version=$(go run build.go version)
-          echo "VERSION=$version" >> $GITHUB_ENV
-
-      - name: Sign shasum files
-        uses: docker://ghcr.io/kastelo/ezapt:latest
-        with:
-          args:
-            sign
-            packages/sha1sum.txt packages/sha256sum.txt
-        env:
-          EZAPT_KEYRING_BASE64: ${{ secrets.APT_GPG_KEYRING_BASE64 }}
-
-      - name: Sign source
-        uses: docker://ghcr.io/kastelo/ezapt:latest
-        with:
-          args:
-            sign --detach --ascii
-            packages/syncthing-source-${{ env.VERSION }}.tar.gz
-        env:
-          EZAPT_KEYRING_BASE64: ${{ secrets.APT_GPG_KEYRING_BASE64 }}
-
-      - name: Archive artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: packages-signed
-          path: |
-            packages/*.tar.gz
-            packages/*.zip
-            packages/*.asc
-            packages/*.json
-
-  #
   # Debian
   #
 
@@ -627,7 +535,11 @@ jobs:
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/tags/v'))
     environment: release
     needs:
-      - sign-for-upgrade
+      - package-windows
+      - package-linux
+      - package-macos
+      - package-cross
+      - package-source
       - package-debian
     runs-on: ubuntu-latest
     steps:
@@ -636,10 +548,10 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.ref }} # https://github.com/actions/checkout/issues/882
 
-      - name: Download signed packages
+      - name: Download unsigned packages
         uses: actions/download-artifact@v4
         with:
-          name: packages-signed
+          name: unsigned-packages-windows
           path: packages
 
       - name: Download debian packages
