@@ -532,10 +532,9 @@ jobs:
           path: tools
           fetch-depth: 0
 
-      - name: Download unsigned artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: unsigned-packages-windows
           path: packages
 
       - uses: actions/setup-go@v5
@@ -566,7 +565,7 @@ jobs:
             | xargs -I {} gh api repos/$GITHUB_REPOSITORY/releases/assets/{} -X DELETE
 
           # Upload new assets to the nightly release
-          for asset in packages/*; do
+          for asset in packages/*/*; do
             gh release upload nightly "$asset"
           done
 
