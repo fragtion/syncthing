@@ -43,7 +43,7 @@ func IsTemporary(name string) bool {
 }
 
 func TempNameWithPrefix(name, prefix string) string {
-  //tdir := filepath.Dir(name)
+	//tdir := filepath.Dir(name)
 	tdir := ".stfolder"
 	tbase := filepath.Base(name)
 	tbase = fmt.Sprintf("%x.%s", sha256.Sum256([]byte(name)), tbase)
