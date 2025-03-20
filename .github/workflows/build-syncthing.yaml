@@ -498,7 +498,11 @@ jobs:
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/release-nightly')
     environment: release
     needs:
-      - sign-for-upgrade
+      - package-windows
+      - package-linux
+      - package-macos
+      - package-cross
+      - package-source
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -507,10 +511,10 @@ jobs:
           path: tools
           fetch-depth: 0
 
-      - name: Download artifacts
+      - name: Download unsigned artifacts
         uses: actions/download-artifact@v4
         with:
-          name: packages-signed
+          name: unsigned-packages-windows
           path: packages
 
       - uses: actions/setup-go@v5
