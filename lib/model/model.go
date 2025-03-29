@@ -20,7 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
+	//"runtime"
 	"strings"
 	stdsync "sync"
 	"sync/atomic"
@@ -28,7 +28,7 @@ import (
 
 	"github.com/thejerf/suture/v4"
 
-	"github.com/syncthing/syncthing/lib/build"
+	//"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/connections"
 	"github.com/syncthing/syncthing/lib/db"
@@ -2558,29 +2558,30 @@ func (m *model) DelayScan(folder string, next time.Duration) {
 // numHashers returns the number of hasher routines to use for a given folder,
 // taking into account configuration and available CPU cores.
 func (m *model) numHashers(folder string) int {
-	m.mut.RLock()
-	folderCfg := m.folderCfgs[folder]
-	numFolders := max(1, len(m.folderCfgs))
-	m.mut.RUnlock()
+	/*
+		m.mut.RLock()
+		folderCfg := m.folderCfgs[folder]
+		numFolders := max(1, len(m.folderCfgs))
+		m.mut.RUnlock()
 
-	if folderCfg.Hashers > 0 {
-		// Specific value set in the config, use that.
-		return folderCfg.Hashers
-	}
+		if folderCfg.Hashers > 0 {
+			// Specific value set in the config, use that.
+			return folderCfg.Hashers
+		}
 
-	if build.IsWindows || build.IsDarwin || build.IsIOS || build.IsAndroid {
-		// Interactive operating systems; don't load the system too heavily by
-		// default.
-		return 1
-	}
+		if build.IsWindows || build.IsDarwin || build.IsIOS || build.IsAndroid {
+			// Interactive operating systems; don't load the system too heavily by
+			// default.
+			return 1
+		}
 
-	// For other operating systems and architectures, lets try to get some
-	// work done... Divide the available CPU cores among the configured
-	// folders.
-	if perFolder := runtime.GOMAXPROCS(-1) / numFolders; perFolder > 0 {
-		return perFolder
-	}
-
+		// For other operating systems and architectures, lets try to get some
+		// work done... Divide the available CPU cores among the configured
+		// folders.
+		if perFolder := runtime.GOMAXPROCS(-1) / numFolders; perFolder > 0 {
+			return perFolder
+		}
+	*/
 	return 1
 }
 
