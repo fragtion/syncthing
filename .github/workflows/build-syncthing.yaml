@@ -35,19 +35,20 @@ env:
 
 jobs:
 
-  sync-upstream:
+  sync:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
 
     steps:
-      # STAGE 1: Sync upstream/main -> origin/main
-      - name: Sync main branch
+      - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
 
-      - name: Hard reset main to upstream
+      - name: Sync main to upstream
         run: |
           git remote add upstream https://github.com/syncthing/syncthing.git
           git fetch upstream main
@@ -56,24 +57,36 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # STAGE 2: Merge main -> fragtion-main (preserving workflows)
       - name: Checkout fragtion-main
         uses: actions/checkout@v4
         with:
           ref: fragtion-main
           path: fragtion-main
+          fetch-depth: 0
 
-      - name: Safe merge
+      - name: Update custom branch
         working-directory: ./fragtion-main
         run: |
           git config user.email "actions@github.com"
           git config user.name "GitHub Actions"
+          
+          # Fetch latest changes
           git fetch origin main
-          git merge --no-commit --no-ff origin/main
-          git reset .github/workflows/
-          git checkout -- .github/workflows/
-          git commit -m "Merge main (preserving workflows)"
-          git push origin fragtion-main
+          
+          # Create merge commit favoring fragtion-main changes
+          git merge -X ours --no-ff origin/main -m "Merge upstream updates ($(date +'%Y-%m-%d'))"
+          
+          # Restore any files you want to absolutely protect from upstream
+          git checkout origin/fragtion-main -- .github/workflows/
+          
+          ## If there were any merge conflicts that needed resolution
+          #if git diff --name-only --diff-filter=U | grep -q '.'; then
+          #  git add -u
+          #  git commit --no-edit --amend
+          #fi
+          
+          # Push the updated branch
+          git push origin fragtion-main --force
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -84,7 +97,7 @@ jobs:
 
   build-test:
     name: Build and test
-    needs: sync-upstream
+    needs: sync
     strategy:
       fail-fast: false
       matrix:
