@@ -3,9 +3,8 @@ name: Build Syncthing
 on:
   pull_request:
   push:
-    branches-ignore:
-      - release
-      - release-rc*
+    branches:
+      - release-nightly
   workflow_call:
   workflow_dispatch:
 
@@ -42,6 +41,50 @@ env:
 # that lead up to code being packaged and signed.
 
 jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Checkout fragtion/main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_PAT }}
+
+      - name: Sync tags from upstream
+        run: |
+          git remote add upstream https://github.com/syncthing/syncthing.git || true
+          git fetch upstream --tags
+          git config --global url."https://${{ secrets.SYNC_PAT }}@github.com".insteadOf "https://github.com"
+          git push origin --tags --force
+
+      - name: Reapply custom changes as a single commit
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+
+          git diff HEAD~1 HEAD > /tmp/changes.patch
+
+          if [ ! -s /tmp/changes.patch ]; then
+            echo "No local changes found. Exiting."
+            exit 0
+          fi
+
+          # Sync fragtion/main with upstream main
+          git fetch upstream main
+          git reset --hard upstream/main
+
+          # Apply the custom changes patch on top of the updated upstream
+          git apply /tmp/changes.patch
+          git add -A
+          git commit -m "Apply local changes to upstream main ($(date +'%Y-%m-%d'))"
+          git push origin main --force
+
+  #
 
   #
   # Source
@@ -102,6 +145,7 @@ jobs:
 
   build-test:
     name: Build and test
+    needs: sync
     strategy:
       fail-fast: false
       matrix:
