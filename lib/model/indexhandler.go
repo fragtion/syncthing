@@ -183,7 +183,7 @@ func (s *indexHandler) Serve(ctx context.Context) (err error) {
 	if err := s.waitWhilePaused(ctx); err != nil {
 		return err
 	}
-	err = s.sendIndexBatch(ctx)
+	err = s.sendIndexTo(ctx)
 
 	// Subscribe to LocalIndexUpdated (we have new information to send) and
 	// DeviceDisconnected (it might be us who disconnected, so we should
@@ -214,14 +214,21 @@ func (s *indexHandler) Serve(ctx context.Context) (err error) {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-evChan:
-				// Consolidate possibly multiple index changes
-				time.Sleep(250 * time.Millisecond)
 			case <-ticker.C:
 			}
 			continue
 		}
 
-		err = s.sendIndexBatch(ctx)
+		err = s.sendIndexTo(ctx)
+
+		// Wait a short amount of time before entering the next loop. If there
+		// are continuous changes happening to the local index, this gives us
+		// time to batch them up a little.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
 
 	return err
@@ -248,8 +255,9 @@ func (s *indexHandler) pause() {
 	s.cond.L.Unlock()
 }
 
-// sendIndexBatch sends one batch of index data.
-func (s *indexHandler) sendIndexBatch(ctx context.Context) error {
+// sendIndexTo sends file infos with a sequence number higher than prevSequence and
+// returns the highest sent sequence number.
+func (s *indexHandler) sendIndexTo(ctx context.Context) error {
 	initial := s.localPrevSequence == 0
 	batch := NewFileInfoBatch(nil)
 	var batchError error

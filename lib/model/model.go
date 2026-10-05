@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -33,7 +32,7 @@ import (
 	"github.com/syncthing/syncthing/internal/db"
 	"github.com/syncthing/syncthing/internal/itererr"
 	"github.com/syncthing/syncthing/internal/slogutil"
-	"github.com/syncthing/syncthing/lib/build"
+	//"github.com/syncthing/syncthing/lib/build"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/connections"
 	"github.com/syncthing/syncthing/lib/events"
@@ -2551,24 +2550,27 @@ func (m *model) DelayScan(folder string, next time.Duration) {
 // numHashers returns the number of hasher routines to use for a given folder,
 // taking into account configuration and available CPU cores.
 func (m *model) numHashers(folder string) int {
-	m.mut.RLock()
-	folderCfg := m.folderCfgs[folder]
-	m.mut.RUnlock()
+	/*
+		m.mut.RLock()
+		folderCfg := m.folderCfgs[folder]
+		m.mut.RUnlock()
 
-	if folderCfg.Hashers > 0 {
-		// Specific value set in the config, use that.
-		return folderCfg.Hashers
-	}
+		if folderCfg.Hashers > 0 {
+			// Specific value set in the config, use that.
+			return folderCfg.Hashers
+		}
 
-	numCPUs := runtime.GOMAXPROCS(-1)
-	switch {
-	case build.IsWindows || build.IsIOS || build.IsAndroid:
-		// Use a quarter of the CPU cores on interactive or constrained OSes
-		return max(1, numCPUs/4)
-	default:
-		// Otherwise use up to half
-		return max(1, numCPUs/2)
-	}
+		numCPUs := runtime.GOMAXPROCS(-1)
+		switch {
+		case build.IsWindows || build.IsIOS || build.IsAndroid:
+			// Use a quarter of the CPU cores on interactive or constrained OSes
+			return max(1, numCPUs/4)
+		default:
+			// Otherwise use up to half
+			return max(1, numCPUs/2)
+		}
+	*/
+	return 1
 }
 
 // generateClusterConfig returns a ClusterConfigMessage that is correct and the
