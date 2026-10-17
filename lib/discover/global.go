@@ -18,7 +18,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -43,10 +42,6 @@ type globalClient struct {
 	noAnnounce     bool
 	noLookup       bool
 	evLogger       events.Logger
-
-	lastAnnouncement []byte
-	reannounceAt     time.Time
-	retryAt          time.Time
 }
 
 type httpClient interface {
@@ -69,7 +64,6 @@ func (a announcement) MarshalJSON() ([]byte, error) {
 	type announcementCopy announcement
 
 	a.Addresses = sanitizeRelayAddresses(a.Addresses)
-	slices.Sort(a.Addresses)
 
 	aCopy := announcementCopy(a)
 	return json.Marshal(aCopy)
@@ -266,14 +260,6 @@ func (c *globalClient) Serve(ctx context.Context) error {
 }
 
 func (c *globalClient) sendAnnouncement(ctx context.Context, timer *time.Timer) {
-	// Retry-After is unconditional, we've been told to go away and should
-	// stay away until such time passes, even if addresses change for
-	// example.
-	if time.Now().Before(c.retryAt) {
-		timer.Reset(time.Until(c.retryAt))
-		return
-	}
-
 	var ann announcement
 	if c.addrList != nil {
 		ann.Addresses = c.addrList.ExternalAddresses()
@@ -291,15 +277,7 @@ func (c *globalClient) sendAnnouncement(ctx context.Context, timer *time.Timer) 
 	// The marshal doesn't fail, I promise.
 	postData, _ := json.Marshal(ann)
 
-	if bytes.Equal(postData, c.lastAnnouncement) && time.Now().Before(c.reannounceAt) {
-		timer.Reset(time.Until(c.reannounceAt))
-		return
-	}
-
 	slog.DebugContext(ctx, "send announcement", "server", c.server, "announcement", ann)
-	// If we fail the announcement we need to retry even if the data hasn't
-	// changed, so clear the previous data.
-	c.lastAnnouncement = nil
 
 	resp, err := c.announceClient.Post(ctx, c.server, "application/json", bytes.NewReader(postData))
 	if err != nil {
@@ -319,9 +297,7 @@ func (c *globalClient) sendAnnouncement(ctx context.Context, timer *time.Timer) 
 			// retry. Follow it.
 			if secs, err := strconv.Atoi(h); err == nil && secs > 0 {
 				slog.DebugContext(ctx, "server sets retry-after", "server", c.server, "seconds", secs)
-				retryInterval := time.Duration(secs) * time.Second
-				c.retryAt = time.Now().Add(retryInterval)
-				timer.Reset(retryInterval)
+				timer.Reset(time.Duration(secs) * time.Second)
 				return
 			}
 		}
@@ -331,20 +307,18 @@ func (c *globalClient) sendAnnouncement(ctx context.Context, timer *time.Timer) 
 	}
 
 	c.setError(nil)
-	c.lastAnnouncement = postData
-	reannounceInterval := defaultReannounceInterval
 
 	if h := resp.Header.Get("Reannounce-After"); h != "" {
 		// The server has a recommendation on when we should
 		// reannounce. Follow it.
 		if secs, err := strconv.Atoi(h); err == nil && secs > 0 {
 			slog.DebugContext(ctx, "announce sets reannounce-after", "server", c.server, "seconds", secs)
-			reannounceInterval = time.Duration(secs) * time.Second
+			timer.Reset(time.Duration(secs) * time.Second)
+			return
 		}
 	}
 
-	c.reannounceAt = time.Now().Add(reannounceInterval)
-	timer.Reset(reannounceInterval)
+	timer.Reset(defaultReannounceInterval)
 }
 
 func (*globalClient) Cache() map[protocol.DeviceID]CacheEntry {
